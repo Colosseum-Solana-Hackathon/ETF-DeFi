@@ -1,6 +1,7 @@
 [workspace]
-members = [
-    "programs/*"
+members = ["crates/strategy-interface",
+    "programs/*",
+    "crates/*"
 ]
 resolver = "2"
 
