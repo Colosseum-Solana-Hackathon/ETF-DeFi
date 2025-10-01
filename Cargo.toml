@@ -1,8 +1,8 @@
 [workspace]
 members = ["crates/strategy-interface",
-    "programs/*",
-    "crates/*"
-]
+    "programs/*"
+    creates/**
+    ]
 resolver = "2"
 
 [profile.release]
