@@ -1,0 +1,7 @@
+[target.bpf]
+rustflags = [
+  "-C", "link-arg=-z",
+  "-C", "link-arg=notext",
+  "-C", "link-arg=-T",
+  "-C", "link-arg=target/bpf/rust/rust-bpf-linker.x",
+]
