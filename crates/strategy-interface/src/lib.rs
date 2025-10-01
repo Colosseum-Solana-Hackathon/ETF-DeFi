@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_lang::system_program::ID;
 
 /// ========= Seeds =========
 pub const STRATEGY_SEED: &[u8] = b"strategy";
@@ -99,4 +100,22 @@ pub trait Strategy {
     fn unstake(&mut self, amount: u64) -> Result<()>;
     fn harvest(&mut self) -> Result<u64>;
     fn report_value(&self) -> u64;
+}
+
+// crates/strategy-interface/src/lib.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strategy_state_size() {
+        assert_eq!(StrategyState::SIZE, 32 + 1 + 32 + 32 + 8 + 8 + 8 + 1 + 1);
+    }
+
+    #[test]
+    fn test_strategy_kind_values() {
+        assert_eq!(StrategyKind::Marinade as u8, 0);
+        assert_eq!(StrategyKind::Lido as u8, 1);
+        assert_eq!(StrategyKind::Mock as u8, 255);
+    }
 }

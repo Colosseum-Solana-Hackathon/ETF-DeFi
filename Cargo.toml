@@ -1,7 +1,7 @@
 [workspace]
 members = ["crates/strategy-interface",
-    "programs/*"
-    creates/**
+    "programs/*",
+    "crates/*"
     ]
 resolver = "2"
 
