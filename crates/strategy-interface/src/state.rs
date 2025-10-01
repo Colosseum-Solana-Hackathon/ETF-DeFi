@@ -1,0 +1,61 @@
+use anchor_lang::prelude::*;
+
+/// ========= Seeds =========
+pub const STRATEGY_SEED: &[u8] = b"strategy";
+
+/// Which protocol this implementation wraps.
+#[repr(u8)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StrategyKind {
+    Marinade = 0,
+    Lido     = 1,
+    Mock     = 255,
+}
+
+/// ========= Persistent state kept by each strategy instance =========
+#[account]
+pub struct StrategyState {
+    /// Only this authority (your Vault program/PDA) may call the strategy.
+    pub vault: Pubkey,
+    /// Strategy kind (debug/sanity).
+    pub kind: u8,
+    /// External protocol program id (e.g., Marinade).
+    pub protocol_program: Pubkey,
+    /// Optional: position mint (e.g., mSOL) if the protocol issues one.
+    pub position_mint: Pubkey,
+
+    /// Total underlying allocated (lamports for SOL strategies).
+    pub total_allocated: u64,
+
+    /// Last reported value in underlying units.
+    pub last_report_value: u64,
+    /// Last time we harvested/reported.
+    pub last_harvest_ts: i64,
+
+    /// Safety switch.
+    pub paused: bool,
+
+    /// PDA bump.
+    pub bump: u8,
+}
+
+impl StrategyState {
+    pub const SIZE: usize =
+        32 + 1 + 32 + 32 + // vault, kind, protocol_program, position_mint
+        8 + 8 + 8 +        // total_allocated, last_report_value, last_harvest_ts
+        1 + 1;             // paused, bump
+}
+
+/// ========= Instruction args =========
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct InitializeArgs {
+    pub kind: u8,
+    pub protocol_program: Pubkey,
+    pub position_mint: Pubkey,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct StakeArgs { pub amount: u64 }
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct UnstakeArgs { pub amount: u64 }
