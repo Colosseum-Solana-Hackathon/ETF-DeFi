@@ -1,9 +1,27 @@
 use anchor_lang::prelude::*;
+use anchor_lang::system_program;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer, MintTo, Burn};
 use anchor_spl::associated_token::AssociatedToken;
 
 mod state;
 use state::Vault;
+
+// Events
+#[event]
+pub struct DepositEvent {
+    pub user: Pubkey,
+    pub amount: u64,
+    pub shares: u64,
+    pub total_assets: u64,
+}
+
+#[event]
+pub struct WithdrawEvent {
+    pub user: Pubkey,
+    pub shares: u64,
+    pub assets: u64,
+    pub total_assets: u64,
+}
 
 declare_id!("AUXhyMXmb4Gwnspmtj6X97saUT2MDJAPVjKnBcipwhz2");
 
@@ -11,23 +29,39 @@ declare_id!("AUXhyMXmb4Gwnspmtj6X97saUT2MDJAPVjKnBcipwhz2");
 pub mod vault {
     use super::*;
 
-    /// Initialize a new vault
-    /// This creates a vault account and mints the initial vault token supply
-    pub fn initialize_vault(
-        ctx: Context<InitializeVault>,
-        underlying_asset_mint: Option<Pubkey>,
-    ) -> Result<()> {
+    /// Initialize a new SOL vault
+    /// This creates a vault account for SOL deposits
+    pub fn initialize_sol_vault(ctx: Context<InitializeSolVault>) -> Result<()> {
         let vault = &mut ctx.accounts.vault;
         
         // Initialize vault with provided parameters
         vault.authority = ctx.accounts.authority.key();
         vault.vault_token_mint = ctx.accounts.vault_token_mint.key();
         vault.total_assets = 0;
-        vault.underlying_asset_mint = underlying_asset_mint;
+        vault.underlying_asset_mint = None; // SOL vault
         vault.bump = ctx.bumps.vault;
 
-        msg!("Vault initialized with authority: {}", vault.authority);
+        msg!("SOL Vault initialized with authority: {}", vault.authority);
         msg!("Vault token mint: {}", vault.vault_token_mint);
+        
+        Ok(())
+    }
+
+    /// Initialize a new SPL token vault
+    /// This creates a vault account for SPL token deposits
+    pub fn initialize_spl_vault(ctx: Context<InitializeSplVault>) -> Result<()> {
+        let vault = &mut ctx.accounts.vault;
+        
+        // Initialize vault with provided parameters
+        vault.authority = ctx.accounts.authority.key();
+        vault.vault_token_mint = ctx.accounts.vault_token_mint.key();
+        vault.total_assets = 0;
+        vault.underlying_asset_mint = Some(ctx.accounts.underlying_asset_mint.key());
+        vault.bump = ctx.bumps.vault;
+
+        msg!("SPL Vault initialized with authority: {}", vault.authority);
+        msg!("Vault token mint: {}", vault.vault_token_mint);
+        msg!("Underlying asset mint: {}", ctx.accounts.underlying_asset_mint.key());
         
         Ok(())
     }
@@ -37,6 +71,34 @@ pub mod vault {
     /// For SPL token deposits, the amount is in the token's smallest unit
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::InvalidAmount);
+
+        // Get vault info for transfer logic
+        let vault_info = ctx.accounts.vault.to_account_info();
+        let is_sol_vault = ctx.accounts.vault.underlying_asset_mint.is_none();
+
+        // Transfer underlying assets to vault
+        if !is_sol_vault {
+            // SPL token deposit
+            let transfer_ctx = CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.user_underlying_token_account.as_ref().unwrap().to_account_info(),
+                    to: ctx.accounts.vault_underlying_token_account.as_ref().unwrap().to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                },
+            );
+            token::transfer(transfer_ctx, amount)?;
+        } else {
+            // SOL deposit - transfer lamports from user to vault
+            let transfer_ctx = CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.user.to_account_info(),
+                    to: vault_info,
+                },
+            );
+            system_program::transfer(transfer_ctx, amount)?;
+        }
 
         let vault = &mut ctx.accounts.vault;
         let vault_token_mint = &mut ctx.accounts.vault_token_mint;
@@ -55,23 +117,6 @@ pub mod vault {
                 .checked_div(vault.total_assets)
                 .ok_or(VaultError::MathOverflow)?
         };
-
-        // Transfer underlying assets to vault
-        if let Some(_underlying_mint) = vault.underlying_asset_mint {
-            // SPL token deposit
-            let transfer_ctx = CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.user_underlying_token_account.as_ref().unwrap().to_account_info(),
-                    to: ctx.accounts.vault_underlying_token_account.as_ref().unwrap().to_account_info(),
-                    authority: ctx.accounts.user.to_account_info(),
-                },
-            );
-            token::transfer(transfer_ctx, amount)?;
-        } else {
-            // SOL deposit - handled by the system program in the instruction
-            // The lamports are transferred via the instruction's accounts
-        }
 
         // Mint vault shares to user
         let mint_ctx = CpiContext::new(
@@ -98,51 +143,69 @@ pub mod vault {
         msg!("Deposited {} assets, received {} shares", amount, shares_to_mint);
         msg!("New total assets: {}", vault.total_assets);
 
+        // Emit deposit event
+        emit!(DepositEvent {
+            user: ctx.accounts.user.key(),
+            amount,
+            shares: shares_to_mint,
+            total_assets: vault.total_assets,
+        });
+
         Ok(())
     }
 
     /// Withdraw assets from the vault by burning shares
-    /// Returns proportional underlying assets based on share ownership
-    pub fn withdraw(ctx: Context<Withdraw>, shares_to_burn: u64) -> Result<()> {
-        require!(shares_to_burn > 0, VaultError::InvalidAmount);
+    /// Burn shares to withdraw proportional assets (in lamports for SOL, tokens for SPL)
+    pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
+        require!(amount > 0, VaultError::InvalidAmount);
 
+        // Get vault info and check user shares before taking mutable references
+        let vault_info = ctx.accounts.vault.to_account_info();
+        let is_sol_vault = ctx.accounts.vault.underlying_asset_mint.is_none();
+        
+        // Check if user has sufficient shares
+        require!(
+            ctx.accounts.user_vault_token_account.amount >= amount,
+            VaultError::InsufficientShares
+        );
+
+        // Now take mutable references
         let vault = &mut ctx.accounts.vault;
         let vault_token_mint = &mut ctx.accounts.vault_token_mint;
         let user_vault_token_account = &mut ctx.accounts.user_vault_token_account;
 
-        // Check user has enough shares
-        require!(
-            user_vault_token_account.amount >= shares_to_burn,
-            VaultError::InsufficientShares
-        );
+        // Calculate assets to withdraw (proportional to shares being burned)
+        let assets_to_withdraw = if vault_token_mint.supply == amount {
+            // If burning all shares, withdraw all assets
+            vault.total_assets
+        } else {
+            // Calculate proportional assets: (amount * total_assets) / total_supply
+            amount
+                .checked_mul(vault.total_assets)
+                .ok_or(VaultError::MathOverflow)?
+                .checked_div(vault_token_mint.supply)
+                .ok_or(VaultError::MathOverflow)?
+        };
 
-        // Calculate assets to withdraw based on share proportion
-        let total_supply = vault_token_mint.supply;
-        let assets_to_withdraw = shares_to_burn
-            .checked_mul(vault.total_assets)
-            .ok_or(VaultError::MathOverflow)?
-            .checked_div(total_supply)
-            .ok_or(VaultError::MathOverflow)?;
-
-        // Check vault has enough assets
-        require!(
-            vault.total_assets >= assets_to_withdraw,
-            VaultError::InsufficientAssets
-        );
-
-        // Burn user's vault shares
+        // Burn vault shares from user
         let burn_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Burn {
                 mint: vault_token_mint.to_account_info(),
                 from: user_vault_token_account.to_account_info(),
-                authority: ctx.accounts.user.to_account_info(),
+                authority: vault.to_account_info(),
             },
         );
-        token::burn(burn_ctx, shares_to_burn)?;
+        let seeds = &[
+            b"vault",
+            vault.authority.as_ref(),
+            &[vault.bump],
+        ];
+        let signer = &[&seeds[..]];
+        token::burn(burn_ctx.with_signer(signer), amount)?;
 
         // Transfer underlying assets to user
-        if let Some(_underlying_mint) = vault.underlying_asset_mint {
+        if !is_sol_vault {
             // SPL token withdrawal
             let transfer_ctx = CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
@@ -152,16 +215,17 @@ pub mod vault {
                     authority: vault.to_account_info(),
                 },
             );
-            let seeds = &[
-                b"vault",
-                vault.authority.as_ref(),
-                &[vault.bump],
-            ];
-            let signer = &[&seeds[..]];
             token::transfer(transfer_ctx.with_signer(signer), assets_to_withdraw)?;
         } else {
-            // SOL withdrawal - handled by the system program in the instruction
-            // The lamports are transferred via the instruction's accounts
+            // SOL withdrawal - transfer lamports from vault to user
+            let transfer_ctx = CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: vault_info,
+                    to: ctx.accounts.user.to_account_info(),
+                },
+            );
+            system_program::transfer(transfer_ctx.with_signer(signer), assets_to_withdraw)?;
         }
 
         // Update vault total assets
@@ -169,15 +233,23 @@ pub mod vault {
             .checked_sub(assets_to_withdraw)
             .ok_or(VaultError::MathOverflow)?;
 
-        msg!("Burned {} shares, withdrew {} assets", shares_to_burn, assets_to_withdraw);
+        msg!("Burned {} shares, withdrew {} assets", amount, assets_to_withdraw);
         msg!("New total assets: {}", vault.total_assets);
+
+        // Emit withdraw event
+        emit!(WithdrawEvent {
+            user: ctx.accounts.user.key(),
+            shares: amount,
+            assets: assets_to_withdraw,
+            total_assets: vault.total_assets,
+        });
 
         Ok(())
     }
 }
 
 #[derive(Accounts)]
-pub struct InitializeVault<'info> {
+pub struct InitializeSolVault<'info> {
     #[account(
         init,
         payer = authority,
@@ -206,6 +278,47 @@ pub struct InitializeVault<'info> {
 }
 
 #[derive(Accounts)]
+pub struct InitializeSplVault<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = Vault::SPACE,
+        seeds = [b"vault", authority.key().as_ref()],
+        bump
+    )]
+    pub vault: Account<'info, Vault>,
+    
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    
+    #[account(
+        init,
+        payer = authority,
+        mint::decimals = 6,
+        mint::authority = vault,
+        seeds = [b"vault_mint", authority.key().as_ref()],
+        bump
+    )]
+    pub vault_token_mint: Account<'info, Mint>,
+    
+    #[account(
+        init,
+        payer = authority,
+        associated_token::mint = underlying_asset_mint,
+        associated_token::authority = vault
+    )]
+    pub vault_underlying_token_account: Account<'info, TokenAccount>,
+    
+    #[account(mut)]
+    pub underlying_asset_mint: Account<'info, Mint>,
+    
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
 pub struct Deposit<'info> {
     #[account(
         mut,
@@ -221,14 +334,13 @@ pub struct Deposit<'info> {
     pub user: Signer<'info>,
     
     #[account(
-        init,
+        init_if_needed,
         payer = user,
         associated_token::mint = vault_token_mint,
         associated_token::authority = user
     )]
     pub user_vault_token_account: Account<'info, TokenAccount>,
     
-    // For SPL token deposits - make these optional and remove constraints
     #[account(mut)]
     pub user_underlying_token_account: Option<Account<'info, TokenAccount>>,
     
@@ -270,6 +382,7 @@ pub struct Withdraw<'info> {
     pub vault_underlying_token_account: Option<Account<'info, TokenAccount>>,
     
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
 
 #[error_code]

@@ -1,3 +1,6 @@
+## this is an unstable feature, we need to remove and fix this later
+cargo-features = ["edition2024"]
+
 [package]
 name = "strategy-interface"
 version = "0.1.0"
