@@ -152,9 +152,9 @@ describe("vault", () => {
       .accounts({
         authority: authority.publicKey,
         underlyingAssetMint: underlyingTokenMint,
-        systemProgram: SystemProgram.programId,
         tokenProgram: TOKEN_PROGRAM_ID,
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
         rent: SYSVAR_RENT_PUBKEY,
       })
       .signers([authority])
@@ -361,8 +361,8 @@ describe("vault", () => {
         .initializeSolVault()
         .accounts({
           authority: user1.publicKey,
-          systemProgram: SystemProgram.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
           rent: SYSVAR_RENT_PUBKEY,
         })
         .signers([user1])
@@ -409,6 +409,353 @@ describe("vault", () => {
       // Verify vault total assets increased
       const vaultAccount = await program.account.vault.fetch(solVault);
       expect(vaultAccount.totalAssets.toNumber()).to.equal(depositAmount);
+    });
+
+    it("Set and remove strategy for SOL vault", async () => {
+      // Create a mock strategy pubkey
+      const mockStrategy = Keypair.generate().publicKey;
+
+      // Set strategy
+      const setStrategyTx = await program.methods
+        .setStrategy(mockStrategy)
+        .accounts({
+          vault: solVault,
+          authority: user1.publicKey,
+        })
+        .signers([user1])
+        .rpc();
+
+      console.log("Set strategy transaction signature", setStrategyTx);
+
+      // Verify strategy was set
+      const vaultAccount = await program.account.vault.fetch(solVault);
+      expect(vaultAccount.strategy.toString()).to.equal(mockStrategy.toString());
+
+      // Remove strategy
+      const removeStrategyTx = await program.methods
+        .removeStrategy()
+        .accounts({
+          vault: solVault,
+          authority: user1.publicKey,
+        })
+        .signers([user1])
+        .rpc();
+
+      console.log("Remove strategy transaction signature", removeStrategyTx);
+
+      // Verify strategy was removed
+      const vaultAccountAfter = await program.account.vault.fetch(solVault);
+      expect(vaultAccountAfter.strategy).to.be.null;
+    });
+
+    it("Only vault authority can set/remove strategy", async () => {
+      const mockStrategy = Keypair.generate().publicKey;
+
+      // Try to set strategy with wrong authority (should fail)
+      try {
+        await program.methods
+          .setStrategy(mockStrategy)
+          .accounts({
+            vault: solVault,
+            authority: user2.publicKey, // Wrong authority
+          })
+          .signers([user2])
+          .rpc();
+
+        expect.fail("Expected transaction to fail");
+      } catch (error) {
+        expect(error.message).to.include("Unauthorized");
+      }
+
+      // Try to remove strategy with wrong authority (should fail)
+      try {
+        await program.methods
+          .removeStrategy()
+          .accounts({
+            vault: solVault,
+            authority: user2.publicKey, // Wrong authority
+          })
+          .signers([user2])
+          .rpc();
+
+        expect.fail("Expected transaction to fail");
+      } catch (error) {
+        expect(error.message).to.include("Unauthorized");
+      }
+    });
+
+    it("Deposit with strategy configured (mock strategy)", async () => {
+      // Set a mock strategy
+      const mockStrategy = Keypair.generate().publicKey;
+      
+      await program.methods
+        .setStrategy(mockStrategy)
+        .accounts({
+          vault: solVault,
+          authority: user1.publicKey,
+        })
+        .signers([user1])
+        .rpc();
+
+      // Deposit with strategy configured
+      const depositAmount = 0.5 * anchor.web3.LAMPORTS_PER_SOL; // 0.5 SOL
+
+      const tx = await program.methods
+        .deposit(new anchor.BN(depositAmount))
+        .accounts({
+          vault: solVault,
+          vaultTokenMint: solVaultTokenMint,
+          user: user2.publicKey,
+          userVaultTokenAccount: user2SolVaultTokenAccount,
+          userUnderlyingTokenAccount: null,
+          vaultUnderlyingTokenAccount: null,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([user2])
+        .rpc();
+
+      console.log("Deposit with strategy transaction signature", tx);
+
+      // Verify user received shares
+      const userVaultTokenAccountInfo = await getAccount(
+        provider.connection,
+        user2SolVaultTokenAccount
+      );
+      expect(userVaultTokenAccountInfo.amount.toString()).to.equal(depositAmount.toString());
+
+      // Verify vault total assets increased
+      const vaultAccount = await program.account.vault.fetch(solVault);
+      expect(vaultAccount.totalAssets.toNumber()).to.equal(1.5 * anchor.web3.LAMPORTS_PER_SOL); // 1 SOL + 0.5 SOL
+    });
+
+    it("Withdraw with strategy configured (mock strategy)", async () => {
+      // Get user2's actual share balance first
+      const userVaultTokenAccountInfo = await getAccount(
+        provider.connection,
+        user2SolVaultTokenAccount
+      );
+      const userShares = userVaultTokenAccountInfo.amount;
+      
+      console.log("User2 shares before withdraw:", userShares.toString());
+      console.log("User2 public key:", user2.publicKey.toString());
+      console.log("Vault token mint:", solVaultTokenMint.toString());
+      
+      // Withdraw all of user2's shares
+      const tx = await program.methods
+        .withdraw(new anchor.BN(userShares))
+        .accounts({
+          vault: solVault,
+          vaultTokenMint: solVaultTokenMint,
+          user: user2.publicKey,
+          userVaultTokenAccount: user2SolVaultTokenAccount,
+          userUnderlyingTokenAccount: null,
+          vaultUnderlyingTokenAccount: null,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([user2])
+        .rpc();
+
+      console.log("Withdraw with strategy transaction signature", tx);
+
+      // Verify user shares were burned
+      const userVaultTokenAccountInfoAfter = await getAccount(
+        provider.connection,
+        user2SolVaultTokenAccount
+      );
+      expect(userVaultTokenAccountInfoAfter.amount.toString()).to.equal("0");
+
+      // Verify vault total assets decreased
+      const vaultAccount = await program.account.vault.fetch(solVault);
+      expect(vaultAccount.totalAssets.toNumber()).to.equal(1 * anchor.web3.LAMPORTS_PER_SOL); // Back to 1 SOL
+    });
+  });
+
+  // Strategy Integration Tests
+  describe("Strategy Integration Tests", () => {
+    let strategyVault: PublicKey;
+    let strategyVaultTokenMint: PublicKey;
+    let user1StrategyVaultTokenAccount: PublicKey;
+    let user2StrategyVaultTokenAccount: PublicKey;
+    let mockStrategy: PublicKey;
+
+    before(async () => {
+      // Create a new vault specifically for strategy testing
+      [strategyVault] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), user2.publicKey.toBuffer()], // Use user2 as authority
+        program.programId
+      );
+
+      [strategyVaultTokenMint] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault_mint"), user2.publicKey.toBuffer()],
+        program.programId
+      );
+
+      user1StrategyVaultTokenAccount = await getAssociatedTokenAddress(
+        strategyVaultTokenMint,
+        user1.publicKey
+      );
+
+      user2StrategyVaultTokenAccount = await getAssociatedTokenAddress(
+        strategyVaultTokenMint,
+        user2.publicKey
+      );
+
+      mockStrategy = Keypair.generate().publicKey;
+    });
+
+    it("Initialize vault without strategy", async () => {
+      const tx = await program.methods
+        .initializeSolVault()
+        .accounts({
+          authority: user2.publicKey,
+          systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          rent: SYSVAR_RENT_PUBKEY,
+        })
+        .signers([user2])
+        .rpc();
+
+      console.log("Initialize strategy vault transaction signature", tx);
+
+      // Verify vault was initialized without strategy
+      const vaultAccount = await program.account.vault.fetch(strategyVault);
+      expect(vaultAccount.strategy).to.be.null;
+    });
+
+    it("Vault works standalone without strategy", async () => {
+      // Deposit without strategy
+      const depositAmount = 2 * anchor.web3.LAMPORTS_PER_SOL; // 2 SOL
+
+      const tx = await program.methods
+        .deposit(new anchor.BN(depositAmount))
+        .accounts({
+          vault: strategyVault,
+          vaultTokenMint: strategyVaultTokenMint,
+          user: user1.publicKey,
+          userVaultTokenAccount: user1StrategyVaultTokenAccount,
+          userUnderlyingTokenAccount: null,
+          vaultUnderlyingTokenAccount: null,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([user1])
+        .rpc();
+
+      console.log("Standalone deposit transaction signature", tx);
+
+      // Verify deposit worked normally
+      const userVaultTokenAccountInfo = await getAccount(
+        provider.connection,
+        user1StrategyVaultTokenAccount
+      );
+      expect(userVaultTokenAccountInfo.amount.toString()).to.equal(depositAmount.toString());
+
+      const vaultAccount = await program.account.vault.fetch(strategyVault);
+      expect(vaultAccount.totalAssets.toNumber()).to.equal(depositAmount);
+    });
+
+    it("Add strategy to existing vault", async () => {
+      // Set strategy on existing vault
+      const tx = await program.methods
+        .setStrategy(mockStrategy)
+        .accounts({
+          vault: strategyVault,
+          authority: user2.publicKey,
+        })
+        .signers([user2])
+        .rpc();
+
+      console.log("Add strategy to existing vault transaction signature", tx);
+
+      // Verify strategy was set
+      const vaultAccount = await program.account.vault.fetch(strategyVault);
+      expect(vaultAccount.strategy.toString()).to.equal(mockStrategy.toString());
+    });
+
+    it("Deposit with strategy after adding it", async () => {
+      // Deposit with strategy now configured
+      const depositAmount = 1 * anchor.web3.LAMPORTS_PER_SOL; // 1 SOL
+
+      const tx = await program.methods
+        .deposit(new anchor.BN(depositAmount))
+        .accounts({
+          vault: strategyVault,
+          vaultTokenMint: strategyVaultTokenMint,
+          user: user2.publicKey,
+          userVaultTokenAccount: user2StrategyVaultTokenAccount,
+          userUnderlyingTokenAccount: null,
+          vaultUnderlyingTokenAccount: null,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([user2])
+        .rpc();
+
+      console.log("Deposit with strategy transaction signature", tx);
+
+      // Verify deposit worked
+      const userVaultTokenAccountInfo = await getAccount(
+        provider.connection,
+        user2StrategyVaultTokenAccount
+      );
+      expect(userVaultTokenAccountInfo.amount.toString()).to.equal(depositAmount.toString());
+
+      const vaultAccount = await program.account.vault.fetch(strategyVault);
+      expect(vaultAccount.totalAssets.toNumber()).to.equal(3 * anchor.web3.LAMPORTS_PER_SOL); // 2 SOL + 1 SOL
+    });
+
+    it("Remove strategy and continue working standalone", async () => {
+      // Remove strategy
+      const removeTx = await program.methods
+        .removeStrategy()
+        .accounts({
+          vault: strategyVault,
+          authority: user2.publicKey,
+        })
+        .signers([user2])
+        .rpc();
+
+      console.log("Remove strategy transaction signature", removeTx);
+
+      // Verify strategy was removed
+      const vaultAccount = await program.account.vault.fetch(strategyVault);
+      expect(vaultAccount.strategy).to.be.null;
+
+      // Deposit after removing strategy (should work normally)
+      const depositAmount = 0.5 * anchor.web3.LAMPORTS_PER_SOL; // 0.5 SOL
+
+      const tx = await program.methods
+        .deposit(new anchor.BN(depositAmount))
+        .accounts({
+          vault: strategyVault,
+          vaultTokenMint: strategyVaultTokenMint,
+          user: user1.publicKey,
+          userVaultTokenAccount: user1StrategyVaultTokenAccount,
+          userUnderlyingTokenAccount: null,
+          vaultUnderlyingTokenAccount: null,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([user1])
+        .rpc();
+
+      console.log("Deposit after removing strategy transaction signature", tx);
+
+      // Verify deposit worked normally
+      const userVaultTokenAccountInfo = await getAccount(
+        provider.connection,
+        user1StrategyVaultTokenAccount
+      );
+      expect(userVaultTokenAccountInfo.amount.toString()).to.equal((2.5 * anchor.web3.LAMPORTS_PER_SOL).toString()); // 2 SOL + 0.5 SOL
+
+      const vaultAccountAfter = await program.account.vault.fetch(strategyVault);
+      expect(vaultAccountAfter.totalAssets.toNumber()).to.equal(3.5 * anchor.web3.LAMPORTS_PER_SOL); // 3 SOL + 0.5 SOL
     });
   });
 });
