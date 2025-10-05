@@ -6,6 +6,15 @@ use anchor_spl::associated_token::AssociatedToken;
 mod state;
 use state::Vault;
 
+// Import strategy interface types
+use strategy_interface::{
+    StrategyState,
+    StrategyKind,
+    InitializeArgs,
+    StakeArgs,
+    UnstakeArgs,
+};
+
 // Events
 #[event]
 pub struct DepositEvent {
@@ -39,6 +48,7 @@ pub mod vault {
         vault.vault_token_mint = ctx.accounts.vault_token_mint.key();
         vault.total_assets = 0;
         vault.underlying_asset_mint = None; // SOL vault
+        vault.strategy = None; // No strategy initially
         vault.bump = ctx.bumps.vault;
 
         msg!("SOL Vault initialized with authority: {}", vault.authority);
@@ -57,6 +67,7 @@ pub mod vault {
         vault.vault_token_mint = ctx.accounts.vault_token_mint.key();
         vault.total_assets = 0;
         vault.underlying_asset_mint = Some(ctx.accounts.underlying_asset_mint.key());
+        vault.strategy = None; // No strategy initially
         vault.bump = ctx.bumps.vault;
 
         msg!("SPL Vault initialized with authority: {}", vault.authority);
@@ -140,6 +151,17 @@ pub mod vault {
             .checked_add(amount)
             .ok_or(VaultError::MathOverflow)?;
 
+        // If strategy is configured, delegate the assets to the strategy
+        if let Some(strategy_pubkey) = vault.strategy {
+            msg!("Delegating {} assets to strategy: {}", amount, strategy_pubkey);
+            
+            // Call strategy's stake function
+            // Note: This is a placeholder for now - actual strategy calls will be implemented
+            // when specific strategies (Marinade, Katana, etc.) are added
+            // For now, we just log that we would delegate to the strategy
+            msg!("Strategy delegation would happen here for strategy: {}", strategy_pubkey);
+        }
+
         msg!("Deposited {} assets, received {} shares", amount, shares_to_mint);
         msg!("New total assets: {}", vault.total_assets);
 
@@ -151,6 +173,42 @@ pub mod vault {
             total_assets: vault.total_assets,
         });
 
+        Ok(())
+    }
+
+    /// Set a strategy for the vault (only callable by vault authority)
+    /// This allows the vault to delegate asset management to a strategy
+    pub fn set_strategy(ctx: Context<SetStrategy>, strategy: Pubkey) -> Result<()> {
+        let vault = &mut ctx.accounts.vault;
+        
+        // Only vault authority can set strategy
+        require!(
+            ctx.accounts.authority.key() == vault.authority,
+            VaultError::Unauthorized
+        );
+        
+        vault.strategy = Some(strategy);
+        
+        msg!("Strategy set for vault: {}", strategy);
+        
+        Ok(())
+    }
+
+    /// Remove strategy from vault (only callable by vault authority)
+    /// This makes the vault work standalone without delegation
+    pub fn remove_strategy(ctx: Context<RemoveStrategy>) -> Result<()> {
+        let vault = &mut ctx.accounts.vault;
+        
+        // Only vault authority can remove strategy
+        require!(
+            ctx.accounts.authority.key() == vault.authority,
+            VaultError::Unauthorized
+        );
+        
+        vault.strategy = None;
+        
+        msg!("Strategy removed from vault");
+        
         Ok(())
     }
 
@@ -193,16 +251,18 @@ pub mod vault {
             Burn {
                 mint: vault_token_mint.to_account_info(),
                 from: user_vault_token_account.to_account_info(),
-                authority: vault.to_account_info(),
+                authority: ctx.accounts.user.to_account_info(),
             },
         );
+        token::burn(burn_ctx, amount)?;
+
+        // Prepare vault PDA signer for asset transfers
         let seeds = &[
             b"vault",
             vault.authority.as_ref(),
             &[vault.bump],
         ];
         let signer = &[&seeds[..]];
-        token::burn(burn_ctx.with_signer(signer), amount)?;
 
         // Transfer underlying assets to user
         if !is_sol_vault {
@@ -218,14 +278,21 @@ pub mod vault {
             token::transfer(transfer_ctx.with_signer(signer), assets_to_withdraw)?;
         } else {
             // SOL withdrawal - transfer lamports from vault to user
-            let transfer_ctx = CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: vault_info,
-                    to: ctx.accounts.user.to_account_info(),
-                },
-            );
-            system_program::transfer(transfer_ctx.with_signer(signer), assets_to_withdraw)?;
+            // For PDAs with data, we can't use system_program::transfer
+            // Instead, we modify lamport balances directly
+            **vault_info.try_borrow_mut_lamports()? -= assets_to_withdraw;
+            **ctx.accounts.user.to_account_info().try_borrow_mut_lamports()? += assets_to_withdraw;
+        }
+
+        // If strategy is configured, withdraw assets from the strategy first
+        if let Some(strategy_pubkey) = vault.strategy {
+            msg!("Withdrawing {} assets from strategy: {}", assets_to_withdraw, strategy_pubkey);
+            
+            // Call strategy's unstake function
+            // Note: This is a placeholder for now - actual strategy calls will be implemented
+            // when specific strategies (Marinade, Katana, etc.) are added
+            // For now, we just log that we would withdraw from the strategy
+            msg!("Strategy withdrawal would happen here for strategy: {}", strategy_pubkey);
         }
 
         // Update vault total assets
@@ -385,6 +452,32 @@ pub struct Withdraw<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct SetStrategy<'info> {
+    #[account(
+        mut,
+        seeds = [b"vault", vault.authority.as_ref()],
+        bump = vault.bump
+    )]
+    pub vault: Account<'info, Vault>,
+    
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct RemoveStrategy<'info> {
+    #[account(
+        mut,
+        seeds = [b"vault", vault.authority.as_ref()],
+        bump = vault.bump
+    )]
+    pub vault: Account<'info, Vault>,
+    
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
+
 #[error_code]
 pub enum VaultError {
     #[msg("Invalid amount: must be greater than 0")]
@@ -397,4 +490,6 @@ pub enum VaultError {
     MathOverflow,
     #[msg("Invalid underlying asset")]
     InvalidUnderlyingAsset,
+    #[msg("Unauthorized: only vault authority can perform this action")]
+    Unauthorized,
 }

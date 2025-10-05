@@ -11,6 +11,8 @@ pub struct Vault {
     pub total_assets: u64,
     /// The underlying asset mint (None for SOL, Some(mint) for SPL tokens)
     pub underlying_asset_mint: Option<Pubkey>,
+    /// Optional strategy PDA for delegated asset management
+    pub strategy: Option<Pubkey>,
     /// Bump seed for the vault PDA
     pub bump: u8,
 }
@@ -23,6 +25,7 @@ impl Vault {
         32 + // vault_token_mint
         8 +  // total_assets
         1 + 32 + // underlying_asset_mint (Option<Pubkey>)
+        1 + 32 + // strategy (Option<Pubkey>)
         1;   // bump
 
     /// Create a new vault instance
@@ -30,6 +33,7 @@ impl Vault {
         authority: Pubkey,
         vault_token_mint: Pubkey,
         underlying_asset_mint: Option<Pubkey>,
+        strategy: Option<Pubkey>,
         bump: u8,
     ) -> Self {
         Self {
@@ -37,6 +41,7 @@ impl Vault {
             vault_token_mint,
             total_assets: 0,
             underlying_asset_mint,
+            strategy,
             bump,
         }
     }
