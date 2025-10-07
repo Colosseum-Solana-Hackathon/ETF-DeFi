@@ -1,8 +1,11 @@
 [workspace]
-members = ["crates/strategy-interface",
-    "programs/*",
+members = [
+    "crates/strategy-interface",
+    "programs/etf-defi",
+    "programs/vault",
+    "programs/marinade_strategy",
     "crates/*"
-    ]
+]
 resolver = "2"
 
 [profile.release]
