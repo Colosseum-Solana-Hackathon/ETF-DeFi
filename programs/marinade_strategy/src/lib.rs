@@ -1,15 +1,14 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{
-    instruction::{AccountMeta, Instruction},
-    program::invoke_signed,
-};
 use anchor_spl::token::{Mint, Token, TokenAccount};
 use anchor_spl::associated_token::AssociatedToken;
+use marinade_cpi::program::MarinadeFinance;
+use marinade_cpi::cpi::accounts::{Deposit, LiquidUnstake};
+use marinade_cpi::cpi::{deposit as marinade_deposit, liquid_unstake as marinade_liquid_unstake};
 
 declare_id!("H1Z8qhsV7SLPkmB8g3RtQ5yunzTiHQCCQyS9Sh5SPLpn");
 
 // Marinade Finance program ID (mainnet/devnet)
-pub const MARINADE_PROGRAM_ID: &str = "MarBmsSgKXdruk9RqBmHFrCAB8yMdQxPR9e7Q5Zz2vSPn";
+pub const MARINADE_PROGRAM_ID: &str = "MarBmsSgKXdrN1egZf5sqe1TMai9K1rChYNDJgjq7aD";
 
 // mSOL mint address (mainnet/devnet)
 pub const MSOL_MINT: &str = "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So";
@@ -35,31 +34,7 @@ pub mod marinade_strategy {
         
         msg!("Staking {} lamports to Marinade", amount);
         
-        // Marinade deposit instruction discriminator
-        // This calls marinade_finance::deposit
-        let mut deposit_data = vec![0xf2, 0x23, 0xc6, 0x89, 0x6e, 0x38, 0xc4, 0xf6];
-        deposit_data.extend_from_slice(&amount.to_le_bytes());
-        
-        let marinade_program_id = ctx.accounts.marinade_program.key();
-        
-        let deposit_ix = Instruction {
-            program_id: marinade_program_id,
-            accounts: vec![
-                AccountMeta::new(ctx.accounts.marinade_state.key(), false),
-                AccountMeta::new(ctx.accounts.msol_mint.key(), false),
-                AccountMeta::new_readonly(ctx.accounts.liq_pool_sol_leg_pda.key(), false),
-                AccountMeta::new(ctx.accounts.liq_pool_msol_leg.key(), false),
-                AccountMeta::new(ctx.accounts.liq_pool_msol_leg_authority.key(), false),
-                AccountMeta::new(ctx.accounts.reserve_pda.key(), false),
-                AccountMeta::new(ctx.accounts.strategy_account.key(), true), // Transfer authority
-                AccountMeta::new(ctx.accounts.msol_ata.key(), false),
-                AccountMeta::new_readonly(ctx.accounts.msol_mint_authority.key(), false),
-                AccountMeta::new_readonly(ctx.accounts.system_program.key(), false),
-                AccountMeta::new_readonly(ctx.accounts.token_program.key(), false),
-            ],
-            data: deposit_data,
-        };
-        
+        // Build CPI context for Marinade deposit
         let vault_key = ctx.accounts.vault.key();
         let seeds = &[
             b"marinade_strategy",
@@ -68,23 +43,28 @@ pub mod marinade_strategy {
         ];
         let signer = &[&seeds[..]];
         
-        invoke_signed(
-            &deposit_ix,
-            &[
-                ctx.accounts.marinade_state.to_account_info(),
-                ctx.accounts.msol_mint.to_account_info(),
-                ctx.accounts.liq_pool_sol_leg_pda.to_account_info(),
-                ctx.accounts.liq_pool_msol_leg.to_account_info(),
-                ctx.accounts.liq_pool_msol_leg_authority.to_account_info(),
-                ctx.accounts.reserve_pda.to_account_info(),
-                ctx.accounts.strategy_account.to_account_info(),
-                ctx.accounts.msol_ata.to_account_info(),
-                ctx.accounts.msol_mint_authority.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-                ctx.accounts.token_program.to_account_info(),
-            ],
+        let cpi_accounts = Deposit {
+            state: ctx.accounts.marinade_state.to_account_info(),
+            msol_mint: ctx.accounts.msol_mint.to_account_info(),
+            liq_pool_sol_leg_pda: ctx.accounts.liq_pool_sol_leg_pda.to_account_info(),
+            liq_pool_msol_leg: ctx.accounts.liq_pool_msol_leg.to_account_info(),
+            liq_pool_msol_leg_authority: ctx.accounts.liq_pool_msol_leg_authority.to_account_info(),
+            reserve_pda: ctx.accounts.reserve_pda.to_account_info(),
+            transfer_from: ctx.accounts.payer.to_account_info(),
+            mint_to: ctx.accounts.msol_ata.to_account_info(),
+            msol_mint_authority: ctx.accounts.msol_mint_authority.to_account_info(),
+            system_program: ctx.accounts.system_program.to_account_info(),
+            token_program: ctx.accounts.token_program.to_account_info(),
+        };
+        
+        let cpi_ctx = CpiContext::new_with_signer(
+            ctx.accounts.marinade_program.to_account_info(),
+            cpi_accounts,
             signer,
-        )?;
+        );
+        
+        // Call Marinade deposit instruction
+        marinade_deposit(cpi_ctx, amount)?;
         
         // Update strategy state
         let strategy = &mut ctx.accounts.strategy_account;
@@ -109,29 +89,6 @@ pub mod marinade_strategy {
         
         msg!("Liquid unstaking {} mSOL from Marinade", msol_amount);
         
-        // Marinade liquid_unstake instruction discriminator
-        let mut unstake_data = vec![0xdd, 0x53, 0xf1, 0x3c, 0xd4, 0xc7, 0x5e, 0x9d];
-        unstake_data.extend_from_slice(&msol_amount.to_le_bytes());
-        
-        let marinade_program_id = ctx.accounts.marinade_program.key();
-        
-        let unstake_ix = Instruction {
-            program_id: marinade_program_id,
-            accounts: vec![
-                AccountMeta::new(ctx.accounts.marinade_state.key(), false),
-                AccountMeta::new(ctx.accounts.msol_mint.key(), false),
-                AccountMeta::new(ctx.accounts.liq_pool_sol_leg_pda.key(), false),
-                AccountMeta::new(ctx.accounts.liq_pool_msol_leg.key(), false),
-                AccountMeta::new(ctx.accounts.treasury_msol_account.key(), false),
-                AccountMeta::new(ctx.accounts.msol_ata.key(), false),
-                AccountMeta::new(ctx.accounts.strategy_account.key(), true),
-                AccountMeta::new(ctx.accounts.vault.key(), false), // Receives SOL
-                AccountMeta::new_readonly(ctx.accounts.system_program.key(), false),
-                AccountMeta::new_readonly(ctx.accounts.token_program.key(), false),
-            ],
-            data: unstake_data,
-        };
-        
         let vault_key = ctx.accounts.vault.key();
         let seeds = &[
             b"marinade_strategy",
@@ -140,22 +97,27 @@ pub mod marinade_strategy {
         ];
         let signer = &[&seeds[..]];
         
-        invoke_signed(
-            &unstake_ix,
-            &[
-                ctx.accounts.marinade_state.to_account_info(),
-                ctx.accounts.msol_mint.to_account_info(),
-                ctx.accounts.liq_pool_sol_leg_pda.to_account_info(),
-                ctx.accounts.liq_pool_msol_leg.to_account_info(),
-                ctx.accounts.treasury_msol_account.to_account_info(),
-                ctx.accounts.msol_ata.to_account_info(),
-                ctx.accounts.strategy_account.to_account_info(),
-                ctx.accounts.vault.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-                ctx.accounts.token_program.to_account_info(),
-            ],
+        let cpi_accounts = LiquidUnstake {
+            state: ctx.accounts.marinade_state.to_account_info(),
+            msol_mint: ctx.accounts.msol_mint.to_account_info(),
+            liq_pool_sol_leg_pda: ctx.accounts.liq_pool_sol_leg_pda.to_account_info(),
+            liq_pool_msol_leg: ctx.accounts.liq_pool_msol_leg.to_account_info(),
+            treasury_msol_account: ctx.accounts.treasury_msol_account.to_account_info(),
+            get_msol_from: ctx.accounts.msol_ata.to_account_info(),
+            get_msol_from_authority: ctx.accounts.strategy_account.to_account_info(),
+            transfer_sol_to: ctx.accounts.vault.to_account_info(),
+            system_program: ctx.accounts.system_program.to_account_info(),
+            token_program: ctx.accounts.token_program.to_account_info(),
+        };
+        
+        let cpi_ctx = CpiContext::new_with_signer(
+            ctx.accounts.marinade_program.to_account_info(),
+            cpi_accounts,
             signer,
-        )?;
+        );
+        
+        // Call Marinade liquid_unstake instruction
+        marinade_liquid_unstake(cpi_ctx, msol_amount)?;
         
         msg!("Liquid unstaked {} mSOL", msol_amount);
         
@@ -187,6 +149,12 @@ pub mod marinade_strategy {
         msg!("mSOL balance: {}, estimated SOL value: {}", msol_balance, sol_value);
         
         Ok(sol_value)
+    }
+
+    /// Close strategy account and return lamports to payer
+    pub fn close_strategy(ctx: Context<CloseStrategy>) -> Result<()> {
+        msg!("Closing strategy account");
+        Ok(())
     }
 }
 
@@ -236,6 +204,10 @@ pub struct Stake<'info> {
     #[account(mut)]
     pub vault: AccountInfo<'info>,
     
+    /// Payer for transaction fees and rent
+    #[account(mut, signer)]
+    pub payer: Signer<'info>,
+    
     /// CHECK: Marinade state account - validated by Marinade program
     #[account(mut)]
     pub marinade_state: AccountInfo<'info>,
@@ -255,6 +227,7 @@ pub struct Stake<'info> {
     pub msol_ata: Account<'info, TokenAccount>,
     
     /// CHECK: mSOL mint authority - validated by Marinade program
+    #[account(mut)]
     pub msol_mint_authority: AccountInfo<'info>,
     
     /// CHECK: Liquidity pool SOL leg PDA - validated by Marinade program
@@ -266,6 +239,7 @@ pub struct Stake<'info> {
     pub liq_pool_msol_leg: Account<'info, TokenAccount>,
     
     /// CHECK: Liquidity pool mSOL leg authority - validated by Marinade program
+    #[account(mut)]
     pub liq_pool_msol_leg_authority: AccountInfo<'info>,
     
     /// CHECK: Marinade program
@@ -369,6 +343,26 @@ pub struct StrategyAccount {
     pub vault: Pubkey,
     pub total_staked: u64,
     pub msol_balance: u64,
+}
+
+#[derive(Accounts)]
+pub struct CloseStrategy<'info> {
+    #[account(
+        mut,
+        close = payer,
+        seeds = [b"marinade_strategy", vault.key().as_ref()],
+        bump = strategy_account.bump,
+        constraint = strategy_account.vault == vault.key()
+    )]
+    pub strategy_account: Account<'info, StrategyAccount>,
+    
+    /// Vault program account (authority for funds)
+    #[account(mut)]
+    pub vault: AccountInfo<'info>,
+    
+    /// Payer to receive the closed account's lamports
+    #[account(mut, signer)]
+    pub payer: Signer<'info>,
 }
 
 #[error_code]

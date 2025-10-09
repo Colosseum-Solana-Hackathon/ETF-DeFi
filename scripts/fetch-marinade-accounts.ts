@@ -5,7 +5,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
  * Run with: ts-node scripts/fetch-marinade-accounts.ts
  */
 
-const MARINADE_PROGRAM_ID = new PublicKey("MarBmsSgKXdruk9RqBmHFrCAB8yMdQxPR9e7Q5Zz2vSPn");
+const MARINADE_PROGRAM_ID = new PublicKey("MarBmsSgKXdrN1egZf5sqe1TMai9K1rChYNDJgjq7aD");
 const MARINADE_STATE = new PublicKey("8szGkuLTAux9XMgZ2vtY39jVSowEcpBfFfD8hXSEqdGC");
 const MSOL_MINT = new PublicKey("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So");
 
