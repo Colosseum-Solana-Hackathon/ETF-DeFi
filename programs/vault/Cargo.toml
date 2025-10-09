@@ -23,3 +23,4 @@ anchor-debug = []
 anchor-lang = {version = "0.31.1", features = ["init-if-needed"]}
 anchor-spl = "0.31.0"
 strategy-interface = { path = "../../crates/strategy-interface" }
+pyth-sdk-solana = "0.10.0"

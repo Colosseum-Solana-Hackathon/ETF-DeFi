@@ -9,11 +9,15 @@ skip-lint = false
 etf_defi = "99r9oxGjw29EvJBKEyQreaM8Hj45pP5La2URP1swANCJ"
 vault = "AUXhyMXmb4Gwnspmtj6X97saUT2MDJAPVjKnBcipwhz2"
 
+[programs.devnet]
+etf_defi = "99r9oxGjw29EvJBKEyQreaM8Hj45pP5La2URP1swANCJ"
+vault = "AUXhyMXmb4Gwnspmtj6X97saUT2MDJAPVjKnBcipwhz2"
+
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
