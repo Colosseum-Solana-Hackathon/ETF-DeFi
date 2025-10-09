@@ -84,7 +84,9 @@ jupiterRouter.get("/order", async (req, res) => {
 jupiterRouter.post("/execute", async (req, res) => {
   try {
     const { signedTransaction, requestId } = req.body;
+   console.log(`[POST /execute] Received request - requestId: ${requestId}, signedTransaction: ${signedTransaction ? signedTransaction.substring(0, 50) + '...' : 'missing'}`);
     if (!signedTransaction || !requestId) {
+      console.warn("[POST /execute] Validation failed: Missing signedTransaction or requestId");
       return res
         .status(400)
         .json({ error: "signedTransaction and requestId required" });
@@ -93,7 +95,7 @@ jupiterRouter.post("/execute", async (req, res) => {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
-
+console.log(`[POST /execute] Sending to Jupiter API: ${BASE_URL}/execute, payload:`, JSON.stringify({ requestId, signedTransaction: signedTransaction }, null, 2));
     const r = await fetch(`${BASE_URL}/execute`, {
       method: "POST",
       headers,
@@ -101,9 +103,12 @@ jupiterRouter.post("/execute", async (req, res) => {
     });
 
     const json = await r.json();
+    console.log(`[POST /execute] Jupiter API response - status: ${r.status}, body:`, JSON.stringify(json, null, 2));
+    
     return res.json(json);
+    
   } catch (err) {
-    console.error("execute error", err);
+console.error("[POST /execute] Error:", err);
     return res
       .status(500)
       .json({ error: "internal error", details: String(err) });
