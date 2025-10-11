@@ -2,6 +2,30 @@ import express from "express";
 import dotenv from "dotenv";
 dotenv.config();
 
+
+type JupToken = {
+  id: string;
+  name: string;
+  symbol: string;
+  icon?: string;
+  decimals: number;
+  isVerified?: boolean;
+  usdPrice?: number;
+};
+
+type Token = {
+  symbol: string;
+  name: string;
+  address: string;
+  icon?: string;
+  network: "Solana";
+  archived: boolean;
+  badge?: string;
+  decimals: number;
+  priceUsd?: number;
+};
+
+
 const jupiterRouter = express.Router();
 jupiterRouter.use(express.json());
 
@@ -112,6 +136,195 @@ console.error("[POST /execute] Error:", err);
     return res
       .status(500)
       .json({ error: "internal error", details: String(err) });
+  }
+});
+/**
+ * GET /api/jupiter/tokens
+ * Supports pagination
+ * Query params:
+ *   - page: number (default: 1)
+ *   - limit: number (default: 20)
+ */
+jupiterRouter.get("/tokens", async (req, res) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+
+    const JUP_ALL_TOKENS = "https://lite-api.jup.ag/tokens/v2/tag?query=verified";
+    const r = await fetch(JUP_ALL_TOKENS);
+    if (!r.ok) {
+      return res.status(500).json({ error: "Failed to fetch tokens from Jupiter" });
+    }
+    const response = await r.json();
+    if (!Array.isArray(response)) {
+      return res.status(500).json({ error: "Unexpected tokens format from Jupiter API" });
+    }
+    const data: JupToken[] = response;
+    
+    const mapped: Token[] = data.map((t) => ({
+      symbol: t.symbol,
+      name: t.name,
+      address: t.id,
+      icon: t.icon,
+      network: "Solana",
+      archived: false,
+      badge: t.isVerified ? "Verified" : undefined,
+      decimals: t.decimals,
+      priceUsd: t.usdPrice,
+    }));
+
+    const start = (page - 1) * limit;
+    const end = start + limit;
+
+    const paginated = mapped.slice(start, end);
+
+    return res.json({
+      page,
+      limit,
+      total: mapped.length,
+      tokens: paginated,
+    });
+  } catch (err) {
+    console.error("/tokens error:", err);
+    return res.status(500).json({ error: "Internal error", details: String(err) });
+  }
+});
+
+
+const JUP_TOKENS_URL = "https://lite-api.jup.ag/tokens/v2/tag?query=verified";
+const TOKENS_CACHE_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
+let TOKENS_CACHE: { at: number; tokens: Token[] } | null = null;
+
+async function loadAllTokens(): Promise<Token[]> {
+  const now = Date.now();
+  if (TOKENS_CACHE && now - TOKENS_CACHE.at < TOKENS_CACHE_TTL_MS) {
+    return TOKENS_CACHE.tokens;
+  }
+
+  const r = await fetch(JUP_TOKENS_URL, { headers: { "Content-Type": "application/json" } });
+  if (!r.ok) throw new Error(`Jupiter token fetch failed: HTTP ${r.status}`);
+
+  const rawUnknown = await r.json();
+  if (!Array.isArray(rawUnknown)) {
+    throw new Error("Unexpected token list shape from Jupiter");
+  }
+
+  // Light validation of a few fields
+  const raw = rawUnknown as Array<Partial<JupToken>>;
+  for (const t of raw) {
+    if (typeof t?.id !== "string" || typeof t?.symbol !== "string" || typeof t?.name !== "string") {
+      throw new Error("Invalid token item from Jupiter");
+    }
+  }
+
+  const mapped: Token[] = (raw as JupToken[]).map((t) => ({
+    symbol: t.symbol,
+    name: t.name,
+    address: t.id,
+    icon: t.icon,
+    network: "Solana",
+    archived: false,
+    badge: t.isVerified ? "Verified" : undefined,
+    decimals: t.decimals,
+    priceUsd: t.usdPrice,
+  }));
+
+  TOKENS_CACHE = { at: now, tokens: mapped };
+  return mapped;
+}
+
+/**
+ * GET /api/jupiter/tokens/basic
+ * Optional query:
+ *   - symbols: comma-separated symbols to include (default: "SOL,USDT")
+ * Example:
+ *   /api/jupiter/tokens/basic
+ *   /api/jupiter/tokens/basic?symbols=SOL,USDC
+ *
+ * Response:
+ * {
+ *   "data": [Token, ...],
+ *   "meta": { "count": number, "symbols": string[] }
+ * }
+ */
+jupiterRouter.get("/tokens/basic", async (req, res) => {
+  try {
+    const symbolsParam = (req.query.symbols as string | undefined) ?? "SOL,USDT";
+    const wantSymbols = symbolsParam
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+
+    const all = await loadAllTokens();
+    const bySymbol = new Map(all.map((t) => [t.symbol.toUpperCase(), t]));
+    const selected: Token[] = [];
+
+    for (const sym of wantSymbols) {
+      const token = bySymbol.get(sym);
+      if (token) selected.push(token);
+    }
+
+    if (selected.length === 0) {
+      return res.status(502).json({ error: "No requested tokens found from Jupiter" });
+    }
+
+    return res.json({
+      data: selected,                // e.g. [SOL, USDT]
+      meta: { count: selected.length, symbols: wantSymbols },
+    });
+  } catch (err: any) {
+    console.error("basic tokens error", err);
+    return res.status(500).json({ error: "internal error", details: String(err?.message ?? err) });
+  }
+});
+/**
+ * GET /api/jupiter/tokens/search
+ * Supports searching tokens by name or address with pagination
+ * Query params:
+ *   - q: string (search query, required)
+ *   - page: number (default: 1)
+ *   - limit: number (default: 20)
+ */
+jupiterRouter.get("/tokens/search", async (req, res) => {
+  try {
+    const q = req.query.q as string;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+
+    if (!q) {
+      return res.status(400).json({ error: "Search query (q) is required" });
+    }
+
+    const allTokens = await loadAllTokens();
+    const queryLower = q.toLowerCase();
+
+    // Prioritize name matches, then address
+    const filtered = allTokens.filter(
+      (t) =>
+        t.name.toLowerCase().includes(queryLower) ||
+        t.address.toLowerCase().includes(queryLower)
+    );
+
+    // Sort by name matches first
+    filtered.sort((a, b) => {
+      const aNameMatch = a.name.toLowerCase().includes(queryLower) ? 0 : 1;
+      const bNameMatch = b.name.toLowerCase().includes(queryLower) ? 0 : 1;
+      return aNameMatch - bNameMatch;
+    });
+
+    const start = (page - 1) * limit;
+    const end = start + limit;
+    const paginated = filtered.slice(start, end);
+
+    return res.json({
+      page,
+      limit,
+      total: filtered.length,
+      tokens: paginated,
+    });
+  } catch (err) {
+    console.error("/tokens/search error:", err);
+    return res.status(500).json({ error: "Internal error", details: String(err) });
   }
 });
 
