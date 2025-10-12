@@ -7,7 +7,7 @@ const swaggerSpec = {
   },
   servers: [
     {
-      url: "http://localhost:3000",
+      url: "http://localhost:8000",
       description: "Localized server",
     },
   ],
@@ -115,6 +115,64 @@ const swaggerSpec = {
         },
       },
     },
+    "/api/jupiter/tokens": {
+  get: {
+    summary: "Get paginated list of Jupiter tokens",
+    tags: ["Jupiter"],
+    parameters: [
+      {
+        name: "page",
+        in: "query",
+        required: false,
+        schema: { type: "integer", default: 1 },
+        description: "Page number",
+      },
+      {
+        name: "limit",
+        in: "query",
+        required: false,
+        schema: { type: "integer", default: 20 },
+        description: "Number of tokens per page",
+      },
+    ],
+    responses: {
+      200: {
+        description: "Paginated list of tokens",
+        content: {
+          "application/json": {
+            schema: {
+              type: "object",
+              properties: {
+                page: { type: "integer" },
+                limit: { type: "integer" },
+                total: { type: "integer" },
+                tokens: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      symbol: { type: "string" },
+                      name: { type: "string" },
+                      address: { type: "string" },
+                      icon: { type: "string", nullable: true },
+                      network: { type: "string" },
+                      archived: { type: "boolean" },
+                      badge: { type: "string", nullable: true },
+                      decimals: { type: "integer" },
+                      priceUsd: { type: "number", nullable: true },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      500: { description: "Internal server error" },
+    },
+  },
+},
+
   },
   components: {},
 } as const;
