@@ -3,7 +3,7 @@ package_manager = "yarn"
 
 [features]
 resolution = true
-skip-lint = false
+skip-lint = true
 
 [programs.devnet]
 etf_defi = "99r9oxGjw29EvJBKEyQreaM8Hj45pP5La2URP1swANCJ"

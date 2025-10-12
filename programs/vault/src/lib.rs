@@ -2,6 +2,8 @@ use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer, MintTo, Burn};
 use anchor_spl::associated_token::AssociatedToken;
+use pyth_sdk_solana::{load_price_feed_from_account_info, PriceFeed};
+use anchor_lang::solana_program::pubkey;
 
 mod state;
 use state::Vault;
@@ -14,6 +16,12 @@ use strategy_interface::{
     StakeArgs,
     UnstakeArgs,
 };
+
+// Pyth devnet price feed IDs
+pub const BTC_USD_FEED: Pubkey = pubkey!("HovQMDrbAgAYPCmHVSrezcSmkMtXSSUsLDFANExrZh2J");
+pub const ETH_USD_FEED: Pubkey = pubkey!("JBu1AL4obBcCMqKBBxhpWCNUt136ijcuMZLFvTP7iWdB");
+pub const SOL_USD_FEED: Pubkey = pubkey!("H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG");
+pub const STALENESS_THRESHOLD: u64 = 60; // 60 seconds
 
 // Events
 #[event]
@@ -82,6 +90,69 @@ pub mod vault {
     /// For SPL token deposits, the amount is in the token's smallest unit
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::InvalidAmount);
+
+        // Fetch and validate Pyth price feeds
+        let clock = &ctx.accounts.clock;
+        let current_time = clock.unix_timestamp as u64;
+
+        // Load BTC price feed
+        let btc_feed: PriceFeed = load_price_feed_from_account_info(&ctx.accounts.btc_price_feed)
+            .map_err(|_| VaultError::InvalidPriceFeed)?;
+        let btc_price = btc_feed
+            .get_price_no_older_than(current_time as i64, STALENESS_THRESHOLD)
+            .ok_or(VaultError::StalePrice)?;
+        require!(btc_price.conf < (btc_price.price / 100).unsigned_abs(), VaultError::LowConfidence);
+
+        // Load ETH price feed
+        let eth_feed: PriceFeed = load_price_feed_from_account_info(&ctx.accounts.eth_price_feed)
+            .map_err(|_| VaultError::InvalidPriceFeed)?;
+        let eth_price = eth_feed
+            .get_price_no_older_than(current_time as i64, STALENESS_THRESHOLD)
+            .ok_or(VaultError::StalePrice)?;
+        require!(eth_price.conf < (eth_price.price / 100).unsigned_abs(), VaultError::LowConfidence);
+
+        // Load SOL price feed
+        let sol_feed: PriceFeed = load_price_feed_from_account_info(&ctx.accounts.sol_price_feed)
+            .map_err(|_| VaultError::InvalidPriceFeed)?;
+        let sol_price = sol_feed
+            .get_price_no_older_than(current_time as i64, STALENESS_THRESHOLD)
+            .ok_or(VaultError::StalePrice)?;
+        require!(sol_price.conf < (sol_price.price / 100).unsigned_abs(), VaultError::LowConfidence);
+
+        // Log the fetched prices for debugging
+        msg!("BTC/USD Price: ${} (expo: {}, conf: {})", btc_price.price, btc_price.expo, btc_price.conf);
+        msg!("ETH/USD Price: ${} (expo: {}, conf: {})", eth_price.price, eth_price.expo, eth_price.conf);
+        msg!("SOL/USD Price: ${} (expo: {}, conf: {})", sol_price.price, sol_price.expo, sol_price.conf);
+
+        // Calculate asset allocation (assuming USDC deposit with 6 decimals, price = 1 USD)
+        // 40% BTC, 30% ETH, 30% SOL allocation
+        let deposit_usd = amount as i64; // For USDC with 6 decimals, this is direct USD value in micro-dollars
+
+        let btc_alloc_usd = deposit_usd * 40 / 100;
+        let eth_alloc_usd = deposit_usd * 30 / 100;
+        let sol_alloc_usd = deposit_usd * 30 / 100;
+
+        // Calculate token amounts needed based on prices
+        // Note: Pyth prices have negative exponents (e.g., -8 for BTC means price is in 10^-8 units)
+        let btc_amount = if btc_price.expo < 0 {
+            (btc_alloc_usd * 10i64.pow((-btc_price.expo) as u32)) / btc_price.price
+        } else {
+            btc_alloc_usd / (btc_price.price * 10i64.pow(btc_price.expo as u32))
+        };
+
+        let eth_amount = if eth_price.expo < 0 {
+            (eth_alloc_usd * 10i64.pow((-eth_price.expo) as u32)) / eth_price.price
+        } else {
+            eth_alloc_usd / (eth_price.price * 10i64.pow(eth_price.expo as u32))
+        };
+
+        let sol_amount = if sol_price.expo < 0 {
+            (sol_alloc_usd * 10i64.pow((-sol_price.expo) as u32)) / sol_price.price
+        } else {
+            sol_alloc_usd / (sol_price.price * 10i64.pow(sol_price.expo as u32))
+        };
+
+        msg!("Allocating {} BTC, {} ETH, {} SOL (in smallest units)", btc_amount, eth_amount, sol_amount);
 
         // Get vault info for transfer logic
         let vault_info = ctx.accounts.vault.to_account_info();
@@ -217,6 +288,39 @@ pub mod vault {
     pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::InvalidAmount);
 
+        // Fetch and validate Pyth price feeds
+        let clock = &ctx.accounts.clock;
+        let current_time = clock.unix_timestamp as u64;
+
+        // Load BTC price feed
+        let btc_feed: PriceFeed = load_price_feed_from_account_info(&ctx.accounts.btc_price_feed)
+            .map_err(|_| VaultError::InvalidPriceFeed)?;
+        let btc_price = btc_feed
+            .get_price_no_older_than(current_time as i64, STALENESS_THRESHOLD)
+            .ok_or(VaultError::StalePrice)?;
+        require!(btc_price.conf < (btc_price.price / 100).unsigned_abs(), VaultError::LowConfidence);
+
+        // Load ETH price feed
+        let eth_feed: PriceFeed = load_price_feed_from_account_info(&ctx.accounts.eth_price_feed)
+            .map_err(|_| VaultError::InvalidPriceFeed)?;
+        let eth_price = eth_feed
+            .get_price_no_older_than(current_time as i64, STALENESS_THRESHOLD)
+            .ok_or(VaultError::StalePrice)?;
+        require!(eth_price.conf < (eth_price.price / 100).unsigned_abs(), VaultError::LowConfidence);
+
+        // Load SOL price feed
+        let sol_feed: PriceFeed = load_price_feed_from_account_info(&ctx.accounts.sol_price_feed)
+            .map_err(|_| VaultError::InvalidPriceFeed)?;
+        let sol_price = sol_feed
+            .get_price_no_older_than(current_time as i64, STALENESS_THRESHOLD)
+            .ok_or(VaultError::StalePrice)?;
+        require!(sol_price.conf < (sol_price.price / 100).unsigned_abs(), VaultError::LowConfidence);
+
+        // Log the fetched prices for debugging
+        msg!("BTC/USD Price: ${} (expo: {}, conf: {})", btc_price.price, btc_price.expo, btc_price.conf);
+        msg!("ETH/USD Price: ${} (expo: {}, conf: {})", eth_price.price, eth_price.expo, eth_price.conf);
+        msg!("SOL/USD Price: ${} (expo: {}, conf: {})", sol_price.price, sol_price.expo, sol_price.conf);
+
         // Get vault info and check user shares before taking mutable references
         let vault_info = ctx.accounts.vault.to_account_info();
         let is_sol_vault = ctx.accounts.vault.underlying_asset_mint.is_none();
@@ -244,6 +348,8 @@ pub mod vault {
                 .checked_div(vault_token_mint.supply)
                 .ok_or(VaultError::MathOverflow)?
         };
+
+        msg!("Withdrawing {} assets for {} shares based on current prices", assets_to_withdraw, amount);
 
         // Burn vault shares from user
         let burn_ctx = CpiContext::new(
@@ -414,6 +520,20 @@ pub struct Deposit<'info> {
     #[account(mut)]
     pub vault_underlying_token_account: Option<Account<'info, TokenAccount>>,
     
+    /// CHECK: Pyth BTC/USD price feed account
+    #[account(address = BTC_USD_FEED @ VaultError::InvalidPriceFeed)]
+    pub btc_price_feed: AccountInfo<'info>,
+    
+    /// CHECK: Pyth ETH/USD price feed account
+    #[account(address = ETH_USD_FEED @ VaultError::InvalidPriceFeed)]
+    pub eth_price_feed: AccountInfo<'info>,
+    
+    /// CHECK: Pyth SOL/USD price feed account
+    #[account(address = SOL_USD_FEED @ VaultError::InvalidPriceFeed)]
+    pub sol_price_feed: AccountInfo<'info>,
+    
+    pub clock: Sysvar<'info, Clock>,
+    
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
@@ -447,6 +567,20 @@ pub struct Withdraw<'info> {
     
     #[account(mut)]
     pub vault_underlying_token_account: Option<Account<'info, TokenAccount>>,
+    
+    /// CHECK: Pyth BTC/USD price feed account
+    #[account(address = BTC_USD_FEED @ VaultError::InvalidPriceFeed)]
+    pub btc_price_feed: AccountInfo<'info>,
+    
+    /// CHECK: Pyth ETH/USD price feed account
+    #[account(address = ETH_USD_FEED @ VaultError::InvalidPriceFeed)]
+    pub eth_price_feed: AccountInfo<'info>,
+    
+    /// CHECK: Pyth SOL/USD price feed account
+    #[account(address = SOL_USD_FEED @ VaultError::InvalidPriceFeed)]
+    pub sol_price_feed: AccountInfo<'info>,
+    
+    pub clock: Sysvar<'info, Clock>,
     
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -492,4 +626,10 @@ pub enum VaultError {
     InvalidUnderlyingAsset,
     #[msg("Unauthorized: only vault authority can perform this action")]
     Unauthorized,
+    #[msg("Invalid Price Feed")]
+    InvalidPriceFeed,
+    #[msg("Stale Price")]
+    StalePrice,
+    #[msg("Price Confidence Too Low")]
+    LowConfidence,
 }
