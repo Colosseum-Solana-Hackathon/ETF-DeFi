@@ -3,10 +3,12 @@
   "scripts": {
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
-    "test": "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+    "test": "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts",
+    "test:devnet": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com anchor test --skip-local-validator --skip-deploy"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",
+    "@marinade.finance/marinade-ts-sdk": "^5.0.17",
     "@pythnetwork/client": "^2.22.1",
     "@solana/spl-token": "^0.3.9",
     "@solana/web3.js": "^1.87.6"
