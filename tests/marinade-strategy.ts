@@ -2,14 +2,14 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program, BN } from "@coral-xyz/anchor";
 import { MarinadeStrategy } from "../target/types/marinade_strategy";
 import { Vault } from "../target/types/vault";
-import { 
-  PublicKey, 
-  Keypair, 
+import {
+  PublicKey,
+  Keypair,
   SystemProgram,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
-import { 
-  TOKEN_PROGRAM_ID, 
+import {
+  TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   getAssociatedTokenAddress,
   getAccount
@@ -26,7 +26,7 @@ describe("Marinade Strategy Tests", () => {
 
   const marinadeProgram = anchor.workspace.MarinadeStrategy as Program<MarinadeStrategy>;
   const vaultProgram = anchor.workspace.Vault as Program<Vault>;
-  
+
   // Test accounts
   let authority: Keypair;
   let vault: PublicKey;
@@ -40,12 +40,12 @@ describe("Marinade Strategy Tests", () => {
 
   before(async () => {
     console.log("Running tests on:", provider.connection.rpcEndpoint);
-    
+
     // Load or create authority keypair
     // Try to load persistent keypair first, fallback to generating new one
     const keypairPath = path.join(__dirname, "..", "test-keypair.json");
     let keypairData;
-    
+
     try {
       if (fs.existsSync(keypairPath)) {
         keypairData = JSON.parse(fs.readFileSync(keypairPath, "utf8"));
@@ -63,11 +63,11 @@ describe("Marinade Strategy Tests", () => {
         const configOutput = execSync('solana config get', { encoding: 'utf8' });
         const keypairLine = configOutput.split('\n').find(line => line.startsWith('Keypair Path:'));
         const keypairPath = keypairLine ? keypairLine.split(': ')[1].trim() : null;
-        
+
         if (!keypairPath) {
           throw new Error('Could not find keypair path');
         }
-        
+
         const keypairData = JSON.parse(fs.readFileSync(keypairPath));
         authority = Keypair.fromSecretKey(new Uint8Array(keypairData));
         console.log("💰 Using your funded wallet:", authority.publicKey.toString());
@@ -81,13 +81,13 @@ describe("Marinade Strategy Tests", () => {
     // Check if we should skip airdrop (set SKIP_AIRDROP=true to skip)
     // Also skip if we're using the default wallet (which should be funded)
     const skipAirdrop = process.env.SKIP_AIRDROP === 'true' || authority.publicKey.toString() === 'F98Hxpo6MJxpQDouu7Gmt9zBVdf7EinkWGuLLrb7YsYh'; //use your funded wallet here
-    
+
     if (!skipAirdrop) {
       // Request devnet airdrop with retry logic
       console.log("Requesting airdrop for authority:", authority.publicKey.toString());
       let airdropSuccess = false;
       const maxRetries = 3;
-      
+
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
           console.log(`Airdrop attempt ${attempt}/${maxRetries}`);
@@ -146,6 +146,35 @@ describe("Marinade Strategy Tests", () => {
     console.log("Strategy Account:", strategyAccount.toString());
     console.log("mSOL ATA:", msolAta.toString());
   });
+  // --- Setup: Initialize the Vault PDA so it can receive SOL from unstake ---
+  describe("Setup: Initialize Vault PDA", () => {
+    it("Should initialize a SOL vault (PDA) so it can receive SOL", async () => {
+      // derive the vault mint PDA exactly like your vault program
+      const [vaultMint] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault_mint"), authority.publicKey.toBuffer()],
+        vaultProgram.programId
+      );
+
+      const tx = await vaultProgram.methods
+        .initializeSolVault()
+        .accounts({
+          vault,
+          authority: authority.publicKey,
+          vaultTokenMint: vaultMint,
+          systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([authority])
+        .rpc({ commitment: "confirmed" });
+
+      console.log("Vault init signature:", tx);
+      await provider.connection.confirmTransaction(tx, "confirmed");
+
+      const acct = await provider.connection.getAccountInfo(vault, "confirmed");
+      assert.isNotNull(acct, "Vault PDA must be created on-chain (so it can receive SOL)");
+    });
+  });
 
   describe("Test 1: Initialize Strategy Account", () => {
     it("Should initialize strategy account", async () => {
@@ -172,7 +201,7 @@ describe("Marinade Strategy Tests", () => {
 
         // Fetch and verify strategy account
         const strategyAccountData = await marinadeProgram.account.strategyAccount.fetch(strategyAccount);
-        
+
         assert.equal(strategyAccountData.bump, strategyBump, "Bump should match");
         assert.equal(strategyAccountData.vault.toString(), vault.toString(), "Vault pubkey should match");
 
@@ -224,4 +253,56 @@ describe("Marinade Strategy Tests", () => {
       }
     });
   });
+  describe("Test 3: Unstake / Withdraw (Marinade liquid_unstake)", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("Should liquid-unstake some mSOL -> SOL sent to the vault PDA", async () => {
+    // Pre-state
+    const preMsolAcc = await getAccount(provider.connection, msolAta);
+    const preMsol = preMsolAcc.amount; // bigint
+    assert.isTrue(preMsol > 0n, "Need some mSOL first (stake test should have run)");
+
+    const preVaultLamports = await provider.connection.getBalance(vault, "confirmed");
+
+    // Unstake half of current mSOL (be conservative on devnet)
+    const half = preMsol / 2n;
+    const unstakeAmount = new BN(half.toString()); // BN(u64) expected by anchor
+
+    const sig = await marinadeProgram.methods
+      .unstake(unstakeAmount) // NOTE: your ix expects mSOL amount (token units), not lamports
+      .accounts({
+        strategyAccount,
+        vault, // receiver of SOL (must be inited; we did above)
+        marinadeState: marinadeAccounts.marinadeState,
+        msolMint: MSOL_MINT,
+        liqPoolMsolLeg: marinadeAccounts.liqPoolMsolLeg,
+        liqPoolSolLegPda: marinadeAccounts.liqPoolSolLegPda,
+        msolAta, // strategy's mSOL ATA (source to burn)
+        treasuryMsolAccount: marinadeAccounts.treasuryMsolAccount,
+        marinadeProgram: MARINADE_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([authority])
+      .rpc({ commitment: "confirmed" });
+
+    console.log("Unstake tx:", sig);
+    await provider.connection.confirmTransaction(sig, "confirmed");
+    await sleep(700); // small cushion for devnet finality
+
+    // Post-state
+    const postMsolAcc = await getAccount(provider.connection, msolAta);
+    const postMsol = postMsolAcc.amount;
+    const postVaultLamports = await provider.connection.getBalance(vault, "confirmed");
+
+    // Assertions (directional; exact SOL depends on price/fees)
+    assert.isTrue(postMsol < preMsol, "mSOL balance should decrease after liquid_unstake");
+    assert.isTrue(postVaultLamports > preVaultLamports, "Vault SOL should increase (received from Marinade)");
+
+    console.log(
+      `✅ Unstaked ~${half.toString()} mSOL: mSOL ${preMsol} → ${postMsol}, vault SOL ${preVaultLamports} → ${postVaultLamports}`
+    );
+  });
+});
+
 });
