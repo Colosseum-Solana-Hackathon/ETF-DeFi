@@ -9,7 +9,10 @@ const app = express();
 // allow your frontend origin in dev
 app.use(
   cors({
-    origin: ["http://localhost:3000"],     // your Next dev server
+    origin: [
+      "http://localhost:3000",     // your Next dev server
+      "https://lyra-fe.vercel.app" // your production frontend
+    ],
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     maxAge: 86400,

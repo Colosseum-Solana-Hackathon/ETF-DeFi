@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Request, Response } from "express";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -49,7 +49,7 @@ const BASE_URL = "https://lite-api.jup.ag/ultra/v1";
  *   - referralAccount: string (optional)
  *   - referralFee: string or number (optional)
  */
-jupiterRouter.get("/order", async (req, res) => {
+jupiterRouter.get("/order", async (req: Request, res: Response) => {
   try {
     const {
       inputMint,
@@ -105,7 +105,7 @@ jupiterRouter.get("/order", async (req, res) => {
  *   - requestId: string (required)
  * Forwards the request to Jupiter /execute endpoint (backend calls with API key).
  */
-jupiterRouter.post("/execute", async (req, res) => {
+jupiterRouter.post("/execute", async (req: Request, res: Response) => {
   try {
     const { signedTransaction, requestId } = req.body;
    console.log(`[POST /execute] Received request - requestId: ${requestId}, signedTransaction: ${signedTransaction ? signedTransaction.substring(0, 50) + '...' : 'missing'}`);
@@ -145,7 +145,7 @@ console.error("[POST /execute] Error:", err);
  *   - page: number (default: 1)
  *   - limit: number (default: 20)
  */
-jupiterRouter.get("/tokens", async (req, res) => {
+jupiterRouter.get("/tokens", async (req: Request, res: Response) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 20;
@@ -247,7 +247,7 @@ async function loadAllTokens(): Promise<Token[]> {
  *   "meta": { "count": number, "symbols": string[] }
  * }
  */
-jupiterRouter.get("/tokens/basic", async (req, res) => {
+jupiterRouter.get("/tokens/basic", async (req: Request, res: Response) => {
   try {
     const symbolsParam = (req.query.symbols as string | undefined) ?? "SOL,USDT";
     const wantSymbols = symbolsParam
@@ -285,7 +285,7 @@ jupiterRouter.get("/tokens/basic", async (req, res) => {
  *   - page: number (default: 1)
  *   - limit: number (default: 20)
  */
-jupiterRouter.get("/tokens/search", async (req, res) => {
+jupiterRouter.get("/tokens/search", async (req: Request, res: Response) => {
   try {
     const q = req.query.q as string;
     const page = parseInt(req.query.page as string) || 1;
