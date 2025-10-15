@@ -11,7 +11,8 @@
     "@marinade.finance/marinade-ts-sdk": "^5.0.17",
     "@pythnetwork/client": "^2.22.1",
     "@solana/spl-token": "^0.3.9",
-    "@solana/web3.js": "^1.87.6"
+    "@solana/web3.js": "^1.87.6",
+    "@switchboard-xyz/on-demand": "^2.17.5"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.0",

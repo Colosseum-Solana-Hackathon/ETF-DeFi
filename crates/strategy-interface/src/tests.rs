@@ -1,5 +1,3 @@
-use super::*;
-
 #[test]
 fn test_strategy_state_size() {
     assert_eq!(StrategyState::SIZE, 32 + 1 + 32 + 32 + 8 + 8 + 8 + 1 + 1);
