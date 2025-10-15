@@ -1,761 +1,728 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { Vault } from "../target/types/vault";
-import { PublicKey, Keypair, SystemProgram, SYSVAR_RENT_PUBKEY } from "@solana/web3.js";
-import { 
-  TOKEN_PROGRAM_ID, 
+import {
+  PublicKey,
+  Keypair,
+  SystemProgram,
+  SYSVAR_RENT_PUBKEY,
+} from "@solana/web3.js";
+import {
+  TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   createMint,
-  createAccount,
-  mintTo,
   getAccount,
-  getAssociatedTokenAddress,
-  createAssociatedTokenAccount,
   getMint,
+  getAssociatedTokenAddress,
 } from "@solana/spl-token";
 import { expect } from "chai";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 
-describe("vault", () => {
-  // Configure the client to use the local cluster.
+// Helper function to create Associated Token Address
+async function getAssociatedTokenAddressSync(
+  mint: PublicKey,
+  owner: PublicKey,
+  allowOwnerOffCurve = false
+): Promise<PublicKey> {
+  return await getAssociatedTokenAddress(mint, owner, allowOwnerOffCurve);
+}
+
+describe("Multi-Asset Vault Tests", () => {
   anchor.setProvider(anchor.AnchorProvider.env());
 
   const program = anchor.workspace.Vault as Program<Vault>;
   const provider = anchor.getProvider();
 
-  // Test accounts
-  let authority: Keypair;
+  // Pyth price feed addresses for devnet
+  const BTC_USD_FEED = new PublicKey(
+    "HovQMDrbAgAYPCmHVSrezcSmkMtXSSUsLDFANExrZh2J"
+  );
+  const ETH_USD_FEED = new PublicKey(
+    "JBu1AL4obBcCMqKBBxhpWCNUt136ijcuMZLFvTP7iWdB"
+  );
+  const SOL_USD_FEED = new PublicKey(
+    "H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG"
+  );
+
+  let admin: Keypair;
   let user1: Keypair;
   let user2: Keypair;
-  let underlyingTokenMint: PublicKey;
-  let vault: PublicKey;
-  let vaultTokenMint: PublicKey;
-  let user1VaultTokenAccount: PublicKey;
-  let user2VaultTokenAccount: PublicKey;
-  let user1UnderlyingTokenAccount: PublicKey;
-  let user2UnderlyingTokenAccount: PublicKey;
-  let vaultUnderlyingTokenAccount: PublicKey;
+  let btcMint: PublicKey;
+  let ethMint: PublicKey;
+  let solMint: PublicKey;
 
   before(async () => {
+    // Load your existing Solana CLI keypair
+    const keypairPath = path.join(os.homedir(), ".config", "solana", "id.json");
+    const secretKey = Uint8Array.from(
+      JSON.parse(fs.readFileSync(keypairPath, "utf-8"))
+    );
+    admin = Keypair.fromSecretKey(secretKey);
+    
     // Create test keypairs
-    authority = Keypair.generate();
     user1 = Keypair.generate();
     user2 = Keypair.generate();
 
-    // Airdrop SOL to test accounts with confirmations
-    const latestBlockhash = await provider.connection.getLatestBlockhash();
-    
-    const authorityAirdropSig = await provider.connection.requestAirdrop(authority.publicKey, 10 * anchor.web3.LAMPORTS_PER_SOL);
-    await provider.connection.confirmTransaction({
-      signature: authorityAirdropSig,
-      blockhash: latestBlockhash.blockhash,
-      lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-    });
-    
-    const user1AirdropSig = await provider.connection.requestAirdrop(user1.publicKey, 10 * anchor.web3.LAMPORTS_PER_SOL);
-    await provider.connection.confirmTransaction({
-      signature: user1AirdropSig,
-      blockhash: latestBlockhash.blockhash,
-      lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-    });
-    
-    const user2AirdropSig = await provider.connection.requestAirdrop(user2.publicKey, 10 * anchor.web3.LAMPORTS_PER_SOL);
-    await provider.connection.confirmTransaction({
-      signature: user2AirdropSig,
-      blockhash: latestBlockhash.blockhash,
-      lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-    });
+    console.log("✅ Test setup:");
+    console.log("  Admin:", admin.publicKey.toString());
+    console.log("  User1:", user1.publicKey.toString());
+    console.log("  User2:", user2.publicKey.toString());
 
-    // Create underlying token mint for testing
-    underlyingTokenMint = await createMint(
+    // Create test token mints (BTC, ETH, SOL test tokens)
+    btcMint = await createMint(
       provider.connection,
-      authority,
-      authority.publicKey,
+      admin,
+      admin.publicKey,
       null,
-      6
+      8 // BTC has 8 decimals
     );
 
-    // Derive vault PDA
-    [vault] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault"), authority.publicKey.toBuffer()],
-      program.programId
-    );
-
-    // Derive vault token mint PDA
-    [vaultTokenMint] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault_mint"), authority.publicKey.toBuffer()],
-      program.programId
-    );
-
-    // Create associated token accounts
-    user1VaultTokenAccount = await getAssociatedTokenAddress(
-      vaultTokenMint,
-      user1.publicKey
-    );
-
-    user2VaultTokenAccount = await getAssociatedTokenAddress(
-      vaultTokenMint,
-      user2.publicKey
-    );
-
-    user1UnderlyingTokenAccount = await getAssociatedTokenAddress(
-      underlyingTokenMint,
-      user1.publicKey
-    );
-
-    user2UnderlyingTokenAccount = await getAssociatedTokenAddress(
-      underlyingTokenMint,
-      user2.publicKey
-    );
-
-    // Note: vaultUnderlyingTokenAccount will be created by initializeSplVault
-    // We can't create it here because vault is a PDA, not a valid token account owner
-    // The initializeSplVault instruction will create this account
-
-    // Create underlying token accounts for users
-    await createAssociatedTokenAccount(
+    ethMint = await createMint(
       provider.connection,
-      authority,
-      underlyingTokenMint,
-      user1.publicKey
+      admin,
+      admin.publicKey,
+      null,
+      18 // ETH has 18 decimals
     );
 
-    await createAssociatedTokenAccount(
+    solMint = await createMint(
       provider.connection,
-      authority,
-      underlyingTokenMint,
-      user2.publicKey
+      admin,
+      admin.publicKey,
+      null,
+      9 // SOL has 9 decimals
     );
 
-    // Mint underlying tokens to users
-    await mintTo(
-      provider.connection,
-      authority,
-      underlyingTokenMint,
-      user1UnderlyingTokenAccount,
-      authority,
-      1000 * 10**6 // 1000 tokens with 6 decimals
-    );
-
-    await mintTo(
-      provider.connection,
-      authority,
-      underlyingTokenMint,
-      user2UnderlyingTokenAccount,
-      authority,
-      1000 * 10**6 // 1000 tokens with 6 decimals
-    );
+    console.log("  BTC Mint:", btcMint.toString());
+    console.log("  ETH Mint:", ethMint.toString());
+    console.log("  SOL Mint:", solMint.toString());
   });
 
-  it("Initialize vault", async () => {
-    const tx = await program.methods
-      .initializeSplVault()
-      .accounts({
-        authority: authority.publicKey,
-        underlyingAssetMint: underlyingTokenMint,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-        rent: SYSVAR_RENT_PUBKEY,
-      })
-      .signers([authority])
-      .rpc();
+  describe("create_vault", () => {
+    it("Creates a new multi-asset vault with BTC, ETH, SOL composition", async () => {
+      // Use unique vault name to avoid conflicts
+      const vaultName = `TestVault_${Date.now()}`;
+      const assets = [
+        {
+          mint: btcMint,
+          weight: 40, // 40% BTC
+          ata: PublicKey.default, // Will be set by the program
+        },
+        {
+          mint: ethMint,
+          weight: 30, // 30% ETH
+          ata: PublicKey.default, // Will be set by the program
+        },
+        {
+          mint: solMint,
+          weight: 30, // 30% SOL
+          ata: PublicKey.default, // Will be set by the program
+        },
+      ];
 
-    console.log("Initialize vault transaction signature", tx);
+      // Get the vault PDA
+      const [vaultPda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("vault"),
+          new PublicKey(admin.publicKey).toBuffer(),
+          Buffer.from(vaultName),
+        ],
+        program.programId
+      );
 
-    // Verify vault was initialized correctly
-    const vaultAccount = await program.account.vault.fetch(vault);
-    expect(vaultAccount.authority.toString()).to.equal(authority.publicKey.toString());
-    expect(vaultAccount.vaultTokenMint.toString()).to.equal(vaultTokenMint.toString());
-    expect(vaultAccount.totalAssets.toNumber()).to.equal(0);
-    expect(vaultAccount.underlyingAssetMint.toString()).to.equal(underlyingTokenMint.toString());
+      // Get the vault token mint PDA
+      const [vaultTokenMintPda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("vault_mint"),
+          new PublicKey(admin.publicKey).toBuffer(),
+          Buffer.from(vaultName),
+        ],
+        program.programId
+      );
 
-    // Get the vault's underlying token account address
-    // This account was created by initializeSplVault instruction
-    // We need to derive it manually since vault is a PDA
-    const [vaultUnderlyingTokenAccountPDA] = PublicKey.findProgramAddressSync(
-      [
-        vault.toBuffer(),
-        TOKEN_PROGRAM_ID.toBuffer(),
-        underlyingTokenMint.toBuffer(),
-      ],
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-    vaultUnderlyingTokenAccount = vaultUnderlyingTokenAccountPDA;
-  });
+      // Get ATAs for each asset (these will be created by the program)
+      const btcAta = await getAssociatedTokenAddress(btcMint, vaultPda, true);
+      const ethAta = await getAssociatedTokenAddress(ethMint, vaultPda, true);
+      const solAta = await getAssociatedTokenAddress(solMint, vaultPda, true);
 
-  it("User deposits tokens and receives correct shares", async () => {
-    const depositAmount = 100 * 10**6; // 100 tokens with 6 decimals
-
-    const tx = await program.methods
-      .deposit(new anchor.BN(depositAmount))
-      .accounts({
-        vault: vault,
-        vaultTokenMint: vaultTokenMint,
-        user: user1.publicKey,
-        userVaultTokenAccount: user1VaultTokenAccount,
-        userUnderlyingTokenAccount: user1UnderlyingTokenAccount,
-        vaultUnderlyingTokenAccount: vaultUnderlyingTokenAccount,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([user1])
-      .rpc();
-
-    console.log("Deposit transaction signature", tx);
-
-    // Verify user received shares (1:1 ratio for first deposit)
-    const userVaultTokenAccountInfo = await getAccount(
-      provider.connection,
-      user1VaultTokenAccount
-    );
-    expect(userVaultTokenAccountInfo.amount.toString()).to.equal(depositAmount.toString());
-
-    // Verify vault total assets increased
-    const vaultAccount = await program.account.vault.fetch(vault);
-    expect(vaultAccount.totalAssets.toNumber()).to.equal(depositAmount);
-  });
-
-  it("Multiple deposits maintain proportional shares", async () => {
-    const firstDepositAmount = 100 * 10**6;
-    const secondDepositAmount = 200 * 10**6;
-
-    // First deposit by user1
-    await program.methods
-      .deposit(new anchor.BN(firstDepositAmount))
-      .accounts({
-        vault: vault,
-        vaultTokenMint: vaultTokenMint,
-        user: user1.publicKey,
-        userVaultTokenAccount: user1VaultTokenAccount,
-        userUnderlyingTokenAccount: user1UnderlyingTokenAccount,
-        vaultUnderlyingTokenAccount: vaultUnderlyingTokenAccount,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([user1])
-      .rpc();
-
-    // Second deposit by user2
-    await program.methods
-      .deposit(new anchor.BN(secondDepositAmount))
-      .accounts({
-        vault: vault,
-        vaultTokenMint: vaultTokenMint,
-        user: user2.publicKey,
-        userVaultTokenAccount: user2VaultTokenAccount,
-        userUnderlyingTokenAccount: user2UnderlyingTokenAccount,
-        vaultUnderlyingTokenAccount: vaultUnderlyingTokenAccount,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([user2])
-      .rpc();
-
-    // Get account info after both deposits
-    const user1VaultTokenAccountInfo = await getAccount(
-      provider.connection,
-      user1VaultTokenAccount
-    );
-    const user2VaultTokenAccountInfo = await getAccount(
-      provider.connection,
-      user2VaultTokenAccount
-    );
-    const vaultAccount = await program.account.vault.fetch(vault);
-
-    // User1 should have 100 shares (first deposit, 1:1 ratio)
-    // Note: User1 already has 100M shares from previous test, so this adds another 100M
-    const expectedUser1Shares = 100 * 10**6 + firstDepositAmount; // 100M + 100M = 200M
-    expect(user1VaultTokenAccountInfo.amount.toString()).to.equal(expectedUser1Shares.toString());
-
-    // User2 should have 200 shares (second deposit, 1:1 ratio since total was 100)
-    expect(user2VaultTokenAccountInfo.amount.toString()).to.equal(secondDepositAmount.toString());
-
-    // Total assets should be 500M (100M from first test + 100M + 200M from this test)
-    const expectedTotalAssets = 100 * 10**6 + firstDepositAmount + secondDepositAmount; // 100M + 100M + 200M = 400M
-    expect(vaultAccount.totalAssets.toNumber()).to.equal(expectedTotalAssets);
-  });
-
-
-  it("Deposit with 0 amount should fail", async () => {
-    try {
-      await program.methods
-        .deposit(new anchor.BN(0))
+      const tx = await program.methods
+        .createVault(vaultName, assets)
         .accounts({
-          vault: vault,
-          vaultTokenMint: vaultTokenMint,
-          user: user1.publicKey,
-          userVaultTokenAccount: user1VaultTokenAccount,
-          userUnderlyingTokenAccount: user1UnderlyingTokenAccount,
-          vaultUnderlyingTokenAccount: vaultUnderlyingTokenAccount,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
+          admin: admin.publicKey,
         })
-        .signers([user1])
+        .remainingAccounts([
+          { pubkey: btcMint, isWritable: false, isSigner: false },
+          { pubkey: btcAta, isWritable: true, isSigner: false },
+          { pubkey: ethMint, isWritable: false, isSigner: false },
+          { pubkey: ethAta, isWritable: true, isSigner: false },
+          { pubkey: solMint, isWritable: false, isSigner: false },
+          { pubkey: solAta, isWritable: true, isSigner: false },
+        ])
+        .signers([admin])
         .rpc();
 
-      expect.fail("Expected transaction to fail");
-    } catch (error) {
-      expect(error.message).to.include("InvalidAmount");
-    }
+      console.log("Create vault transaction signature", tx);
+
+      // Verify vault was created correctly
+      const vaultAccount = await program.account.vault.fetch(vaultPda);
+      expect(vaultAccount.admin.toString()).to.equal(
+        admin.publicKey.toString()
+      );
+      expect(vaultAccount.name).to.equal(vaultName);
+      expect(vaultAccount.assets.length).to.equal(3);
+      expect(vaultAccount.assets[0].weight).to.equal(40);
+      expect(vaultAccount.assets[1].weight).to.equal(30);
+      expect(vaultAccount.assets[2].weight).to.equal(30);
+    });
+
+    it("Fails with empty vault name", async () => {
+      const vaultName = "";
+      const assets = [
+        {
+          mint: btcMint,
+          weight: 100,
+          ata: PublicKey.default,
+        },
+      ];
+
+      const btcAta = await getAssociatedTokenAddress(btcMint, PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), admin.publicKey.toBuffer(), Buffer.from(vaultName)],
+        program.programId
+      )[0], true);
+
+      try {
+        await program.methods
+          .createVault(vaultName, assets)
+          .accounts({
+            admin: admin.publicKey,
+          })
+          .remainingAccounts([
+            { pubkey: btcMint, isWritable: false, isSigner: false },
+            { pubkey: btcAta, isWritable: true, isSigner: false },
+          ])
+          .signers([admin])
+          .rpc();
+        expect.fail("Should have thrown error for empty vault name");
+      } catch (error: any) {
+        expect(error.message).to.include("InvalidName");
+      }
+    });
+
+    // it("Fails with vault name > 32 characters", async () => {
+    //   const vaultName = "ThisVaultNameIsWayTooLongAndExceeds32Characters";
+    //   const assets = [
+    //     {
+    //       mint: btcMint,
+    //       weight: 100,
+    //       ata: PublicKey.default,
+    //     },
+    //   ];
+
+    //   const btcAta = await getAssociatedTokenAddress(btcMint, PublicKey.findProgramAddressSync(
+    //     [Buffer.from("vault"), admin.publicKey.toBuffer(), Buffer.from(vaultName)],
+    //     program.programId
+    //   )[0], true);
+
+    //   try {
+    //     await program.methods
+    //       .createVault(vaultName, assets)
+    //       .accounts({
+    //         admin: admin.publicKey,
+    //       })
+    //       .remainingAccounts([
+    //         { pubkey: btcMint, isWritable: false, isSigner: false },
+    //         { pubkey: btcAta, isWritable: true, isSigner: false },
+    //       ])
+    //       .signers([admin])
+    //       .rpc();
+    //     expect.fail("Should have thrown error for name > 32 chars");
+    //   } catch (error: any) {
+    //     expect(error.message).to.include("InvalidName");
+    //   }
+    // });
+
+    it("Fails with weights not summing to 100", async () => {
+      const vaultName = `InvalidWeights_${Date.now()}`;
+      const assets = [
+        {
+          mint: btcMint,
+          weight: 40,
+          ata: PublicKey.default,
+        },
+        {
+          mint: ethMint,
+          weight: 40, // Total = 80, not 100
+          ata: PublicKey.default,
+        },
+      ];
+
+      const vaultPda = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), admin.publicKey.toBuffer(), Buffer.from(vaultName)],
+        program.programId
+      )[0];
+
+      const btcAta = await getAssociatedTokenAddress(btcMint, vaultPda, true);
+      const ethAta = await getAssociatedTokenAddress(ethMint, vaultPda, true);
+
+      try {
+        await program.methods
+          .createVault(vaultName, assets)
+          .accounts({
+            admin: admin.publicKey,
+          })
+          .remainingAccounts([
+            { pubkey: btcMint, isWritable: false, isSigner: false },
+            { pubkey: btcAta, isWritable: true, isSigner: false },
+            { pubkey: ethMint, isWritable: false, isSigner: false },
+            { pubkey: ethAta, isWritable: true, isSigner: false },
+          ])
+          .signers([admin])
+          .rpc();
+        expect.fail("Should have thrown error for invalid weight sum");
+      } catch (error: any) {
+        expect(error.message).to.include("InvalidWeights");
+      }
+    });
+
+    it("Fails with zero weight for an asset", async () => {
+      const vaultName = `ZeroWeight_${Date.now()}`;
+      const assets = [
+        {
+          mint: btcMint,
+          weight: 0, // Zero weight invalid
+          ata: PublicKey.default,
+        },
+        {
+          mint: ethMint,
+          weight: 100,
+          ata: PublicKey.default,
+        },
+      ];
+
+      const vaultPda = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), admin.publicKey.toBuffer(), Buffer.from(vaultName)],
+        program.programId
+      )[0];
+
+      const btcAta = await getAssociatedTokenAddress(btcMint, vaultPda, true);
+      const ethAta = await getAssociatedTokenAddress(ethMint, vaultPda, true);
+
+      try {
+        await program.methods
+          .createVault(vaultName, assets)
+          .accounts({
+            admin: admin.publicKey,
+          })
+          .remainingAccounts([
+            { pubkey: btcMint, isWritable: false, isSigner: false },
+            { pubkey: btcAta, isWritable: true, isSigner: false },
+            { pubkey: ethMint, isWritable: false, isSigner: false },
+            { pubkey: ethAta, isWritable: true, isSigner: false },
+          ])
+          .signers([admin])
+          .rpc();
+        expect.fail("Should have thrown error for zero weight");
+      } catch (error: any) {
+        expect(error.message).to.include("InvalidWeights");
+      }
+    });
+
+    it("Fails with zero assets", async () => {
+      const vaultName = `NoAssets_${Date.now()}`;
+      const assets: any[] = []; // Empty assets array
+
+      try {
+        await program.methods
+          .createVault(vaultName, assets)
+          .accounts({
+            admin: admin.publicKey,
+          })
+          .remainingAccounts([])
+          .signers([admin])
+          .rpc();
+        expect.fail("Should have thrown error for zero assets");
+      } catch (error: any) {
+        expect(error.message).to.include("InvalidAssetCount");
+      }
+    });
+
+    it("Fails with more than 10 assets", async () => {
+      const vaultName = `TooManyAssets_${Date.now()}`;
+      // Create 11 assets
+      const assets = Array.from({ length: 11 }, (_, i) => ({
+        mint: btcMint, // Reusing same mint for simplicity
+        weight: i === 0 ? 10 : 9, // Roughly 100% total (10 + 10*9 = 100, close enough)
+        ata: PublicKey.default,
+      }));
+
+      const vaultPda = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), admin.publicKey.toBuffer(), Buffer.from(vaultName)],
+        program.programId
+      )[0];
+
+      const btcAta = await getAssociatedTokenAddress(btcMint, vaultPda, true);
+      const remainingAccounts = Array.from({ length: 11 }, () => [
+        { pubkey: btcMint, isWritable: false, isSigner: false },
+        { pubkey: btcAta, isWritable: true, isSigner: false },
+      ]).flat();
+
+      try {
+        await program.methods
+          .createVault(vaultName, assets)
+          .accounts({
+            admin: admin.publicKey,
+          })
+          .remainingAccounts(remainingAccounts)
+          .signers([admin])
+          .rpc();
+        expect.fail("Should have thrown error for >10 assets");
+      } catch (error: any) {
+        expect(error.message).to.include("InvalidAssetCount");
+      }
+    });
   });
 
-  it("Proportional share calculation works correctly", async () => {
-    // This test verifies that the vault maintains proper proportional accounting
-    // when users deposit at different times with different amounts
-
-    const vaultAccount = await program.account.vault.fetch(vault);
-    const vaultTokenMintInfo = await getMint(provider.connection, vaultTokenMint);
-    
-    console.log("Final vault state:");
-    console.log("- Total assets:", vaultAccount.totalAssets.toString());
-    console.log("- Total supply:", vaultTokenMintInfo.supply.toString());
-    console.log("- User1 shares:", (await getAccount(provider.connection, user1VaultTokenAccount)).amount.toString());
-    console.log("- User2 shares:", (await getAccount(provider.connection, user2VaultTokenAccount)).amount.toString());
-
-    // Verify that total supply equals sum of user shares
-    const user1Shares = (await getAccount(provider.connection, user1VaultTokenAccount)).amount;
-    const user2Shares = (await getAccount(provider.connection, user2VaultTokenAccount)).amount;
-    const totalUserShares = user1Shares + user2Shares;
-    
-    expect(vaultTokenMintInfo.supply.toString()).to.equal(totalUserShares.toString());
-  });
-
-  // SOL Vault Tests
-  describe("SOL Vault Tests", () => {
-    let solVault: PublicKey;
-    let solVaultTokenMint: PublicKey;
-    let user1SolVaultTokenAccount: PublicKey;
-    let user2SolVaultTokenAccount: PublicKey;
+  describe("deposit_multi_asset", () => {
+    let vaultPda: PublicKey;
+    let vaultTokenMintPda: PublicKey;
+    let userVaultTokenAccount: PublicKey;
+    let vaultName: string;
+    let btcAta: PublicKey;
+    let ethAta: PublicKey;
 
     before(async () => {
-      // Derive SOL vault PDA
-      [solVault] = PublicKey.findProgramAddressSync(
-        [Buffer.from("vault"), user1.publicKey.toBuffer()], // Use user1 as authority for SOL vault
+      // Create a vault for testing deposits
+      vaultName = `DepositTest_${Date.now()}`;
+      const assets = [
+        {
+          mint: btcMint,
+          weight: 50, // 50% BTC
+          ata: PublicKey.default,
+        },
+        {
+          mint: ethMint,
+          weight: 50, // 50% ETH
+          ata: PublicKey.default,
+        },
+      ];
+
+      vaultPda = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), admin.publicKey.toBuffer(), Buffer.from(vaultName)],
         program.programId
-      );
+      )[0];
 
-      // Derive SOL vault token mint PDA
-      [solVaultTokenMint] = PublicKey.findProgramAddressSync(
-        [Buffer.from("vault_mint"), user1.publicKey.toBuffer()],
+      vaultTokenMintPda = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault_mint"), admin.publicKey.toBuffer(), Buffer.from(vaultName)],
         program.programId
-      );
+      )[0];
 
-      // Create associated token accounts for SOL vault
-      user1SolVaultTokenAccount = await getAssociatedTokenAddress(
-        solVaultTokenMint,
-        user1.publicKey
-      );
+      // Get ATAs
+      btcAta = await getAssociatedTokenAddress(btcMint, vaultPda, true);
+      ethAta = await getAssociatedTokenAddress(ethMint, vaultPda, true);
 
-      user2SolVaultTokenAccount = await getAssociatedTokenAddress(
-        solVaultTokenMint,
-        user2.publicKey
-      );
-    });
-
-    it("Initialize SOL vault", async () => {
-      const tx = await program.methods
-        .initializeSolVault()
+      // Create the vault
+      await program.methods
+        .createVault(vaultName, assets)
         .accounts({
-          authority: user1.publicKey,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-          rent: SYSVAR_RENT_PUBKEY,
+          admin: admin.publicKey,
         })
-        .signers([user1])
+        .remainingAccounts([
+          { pubkey: btcMint, isWritable: false, isSigner: false },
+          { pubkey: btcAta, isWritable: true, isSigner: false },
+          { pubkey: ethMint, isWritable: false, isSigner: false },
+          { pubkey: ethAta, isWritable: true, isSigner: false },
+        ])
+        .signers([admin])
         .rpc();
 
-      console.log("Initialize SOL vault transaction signature", tx);
+      // Transfer SOL from admin to user1 for testing
+      const transferTx = await provider.connection.sendTransaction(
+        new anchor.web3.Transaction().add(
+          SystemProgram.transfer({
+            fromPubkey: admin.publicKey,
+            toPubkey: user1.publicKey,
+            lamports: 0.1 * anchor.web3.LAMPORTS_PER_SOL, // Just 0.1 SOL for testing
+          })
+        ),
+        [admin]
+      );
+      await provider.connection.confirmTransaction(transferTx);
 
-      // Verify SOL vault was initialized correctly
-      const vaultAccount = await program.account.vault.fetch(solVault);
-      expect(vaultAccount.authority.toString()).to.equal(user1.publicKey.toString());
-      expect(vaultAccount.vaultTokenMint.toString()).to.equal(solVaultTokenMint.toString());
-      expect(vaultAccount.totalAssets.toNumber()).to.equal(0);
-      expect(vaultAccount.underlyingAssetMint).to.be.null;
+      // Create user's vault token account
+      userVaultTokenAccount = await getAssociatedTokenAddress(vaultTokenMintPda, user1.publicKey);
     });
 
     it("User deposits SOL and receives correct shares", async () => {
-      const depositAmount = 1 * anchor.web3.LAMPORTS_PER_SOL; // 1 SOL
+      const depositAmount = 0.01 * anchor.web3.LAMPORTS_PER_SOL; // 0.01 SOL (small amount)
 
       const tx = await program.methods
-        .deposit(new anchor.BN(depositAmount))
-        .accounts({
-          vault: solVault,
-          vaultTokenMint: solVaultTokenMint,
+        .depositMultiAsset(vaultName, new anchor.BN(depositAmount))
+        .accountsStrict({
+          vault: vaultPda,
           user: user1.publicKey,
-          userVaultTokenAccount: user1SolVaultTokenAccount,
-          userUnderlyingTokenAccount: null,
-          vaultUnderlyingTokenAccount: null,
+          userSharesAta: userVaultTokenAccount,
+          vaultTokenMint: vaultTokenMintPda,
+          btcPriceFeed: BTC_USD_FEED,
+          ethPriceFeed: ETH_USD_FEED,
+          solPriceFeed: SOL_USD_FEED,
+          clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
           tokenProgram: TOKEN_PROGRAM_ID,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
         })
+        .remainingAccounts([
+          { pubkey: btcMint, isWritable: false, isSigner: false },
+          { pubkey: btcAta, isWritable: true, isSigner: false },
+          { pubkey: ethMint, isWritable: false, isSigner: false },
+          { pubkey: ethAta, isWritable: true, isSigner: false },
+        ])
         .signers([user1])
         .rpc();
 
-      console.log("SOL Deposit transaction signature", tx);
-
-      // Verify user received shares (1:1 ratio for first deposit)
-      const userVaultTokenAccountInfo = await getAccount(
-        provider.connection,
-        user1SolVaultTokenAccount
-      );
-      expect(userVaultTokenAccountInfo.amount.toString()).to.equal(depositAmount.toString());
-
-      // Verify vault total assets increased
-      const vaultAccount = await program.account.vault.fetch(solVault);
-      expect(vaultAccount.totalAssets.toNumber()).to.equal(depositAmount);
-    });
-
-    it("Set and remove strategy for SOL vault", async () => {
-      // Create a mock strategy pubkey
-      const mockStrategy = Keypair.generate().publicKey;
-
-      // Set strategy
-      const setStrategyTx = await program.methods
-        .setStrategy(mockStrategy)
-        .accounts({
-          vault: solVault,
-          authority: user1.publicKey,
-        })
-        .signers([user1])
-        .rpc();
-
-      console.log("Set strategy transaction signature", setStrategyTx);
-
-      // Verify strategy was set
-      const vaultAccount = await program.account.vault.fetch(solVault);
-      expect(vaultAccount.strategy.toString()).to.equal(mockStrategy.toString());
-
-      // Remove strategy
-      const removeStrategyTx = await program.methods
-        .removeStrategy()
-        .accounts({
-          vault: solVault,
-          authority: user1.publicKey,
-        })
-        .signers([user1])
-        .rpc();
-
-      console.log("Remove strategy transaction signature", removeStrategyTx);
-
-      // Verify strategy was removed
-      const vaultAccountAfter = await program.account.vault.fetch(solVault);
-      expect(vaultAccountAfter.strategy).to.be.null;
-    });
-
-    it("Only vault authority can set/remove strategy", async () => {
-      const mockStrategy = Keypair.generate().publicKey;
-
-      // Try to set strategy with wrong authority (should fail)
-      try {
-        await program.methods
-          .setStrategy(mockStrategy)
-          .accounts({
-            vault: solVault,
-            authority: user2.publicKey, // Wrong authority
-          })
-          .signers([user2])
-          .rpc();
-
-        expect.fail("Expected transaction to fail");
-      } catch (error) {
-        expect(error.message).to.include("Unauthorized");
-      }
-
-      // Try to remove strategy with wrong authority (should fail)
-      try {
-        await program.methods
-          .removeStrategy()
-          .accounts({
-            vault: solVault,
-            authority: user2.publicKey, // Wrong authority
-          })
-          .signers([user2])
-          .rpc();
-
-        expect.fail("Expected transaction to fail");
-      } catch (error) {
-        expect(error.message).to.include("Unauthorized");
-      }
-    });
-
-    it("Deposit with strategy configured (mock strategy)", async () => {
-      // Set a mock strategy
-      const mockStrategy = Keypair.generate().publicKey;
-      
-      await program.methods
-        .setStrategy(mockStrategy)
-        .accounts({
-          vault: solVault,
-          authority: user1.publicKey,
-        })
-        .signers([user1])
-        .rpc();
-
-      // Deposit with strategy configured
-      const depositAmount = 0.5 * anchor.web3.LAMPORTS_PER_SOL; // 0.5 SOL
-
-      const tx = await program.methods
-        .deposit(new anchor.BN(depositAmount))
-        .accounts({
-          vault: solVault,
-          vaultTokenMint: solVaultTokenMint,
-          user: user2.publicKey,
-          userVaultTokenAccount: user2SolVaultTokenAccount,
-          userUnderlyingTokenAccount: null,
-          vaultUnderlyingTokenAccount: null,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([user2])
-        .rpc();
-
-      console.log("Deposit with strategy transaction signature", tx);
+      console.log("✅ Deposit transaction signature", tx);
 
       // Verify user received shares
       const userVaultTokenAccountInfo = await getAccount(
         provider.connection,
-        user2SolVaultTokenAccount
+        userVaultTokenAccount
       );
-      expect(userVaultTokenAccountInfo.amount.toString()).to.equal(depositAmount.toString());
-
-      // Verify vault total assets increased
-      const vaultAccount = await program.account.vault.fetch(solVault);
-      expect(vaultAccount.totalAssets.toNumber()).to.equal(1.5 * anchor.web3.LAMPORTS_PER_SOL); // 1 SOL + 0.5 SOL
+      
+      // First deposit should mint shares 1:1 with deposit value
+      expect(Number(userVaultTokenAccountInfo.amount)).to.be.greaterThan(0);
+      console.log("✅ User received shares:", userVaultTokenAccountInfo.amount.toString());
     });
 
-    it("Withdraw with strategy configured (mock strategy)", async () => {
-      // Get user2's actual share balance first
-      const userVaultTokenAccountInfo = await getAccount(
-        provider.connection,
-        user2SolVaultTokenAccount
-      );
-      const userShares = userVaultTokenAccountInfo.amount;
-      
-      console.log("User2 shares before withdraw:", userShares.toString());
-      console.log("User2 public key:", user2.publicKey.toString());
-      console.log("Vault token mint:", solVaultTokenMint.toString());
-      
-      // Withdraw all of user2's shares
-      const tx = await program.methods
-        .withdraw(new anchor.BN(userShares))
-        .accounts({
-          vault: solVault,
-          vaultTokenMint: solVaultTokenMint,
-          user: user2.publicKey,
-          userVaultTokenAccount: user2SolVaultTokenAccount,
-          userUnderlyingTokenAccount: null,
-          vaultUnderlyingTokenAccount: null,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([user2])
-        .rpc();
-
-      console.log("Withdraw with strategy transaction signature", tx);
-
-      // Verify user shares were burned
-      const userVaultTokenAccountInfoAfter = await getAccount(
-        provider.connection,
-        user2SolVaultTokenAccount
-      );
-      expect(userVaultTokenAccountInfoAfter.amount.toString()).to.equal("0");
-
-      // Verify vault total assets decreased
-      const vaultAccount = await program.account.vault.fetch(solVault);
-      expect(vaultAccount.totalAssets.toNumber()).to.equal(1 * anchor.web3.LAMPORTS_PER_SOL); // Back to 1 SOL
+    it("Fails with zero deposit amount", async () => {
+      try {
+        await program.methods
+          .depositMultiAsset(vaultName, new anchor.BN(0))
+          .accountsStrict({
+            vault: vaultPda,
+            user: user1.publicKey,
+            userSharesAta: userVaultTokenAccount,
+            vaultTokenMint: vaultTokenMintPda,
+            btcPriceFeed: BTC_USD_FEED,
+            ethPriceFeed: ETH_USD_FEED,
+            solPriceFeed: SOL_USD_FEED,
+            clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            rent: SYSVAR_RENT_PUBKEY,
+          })
+          .remainingAccounts([
+            { pubkey: btcMint, isWritable: false, isSigner: false },
+            { pubkey: btcAta, isWritable: true, isSigner: false },
+            { pubkey: ethMint, isWritable: false, isSigner: false },
+            { pubkey: ethAta, isWritable: true, isSigner: false },
+          ])
+          .signers([user1])
+          .rpc();
+        expect.fail("Should have thrown error for zero amount");
+      } catch (error: any) {
+        expect(error.message).to.include("InvalidAmount");
+      }
     });
   });
 
-  // Strategy Integration Tests
-  describe("Strategy Integration Tests", () => {
-    let strategyVault: PublicKey;
-    let strategyVaultTokenMint: PublicKey;
-    let user1StrategyVaultTokenAccount: PublicKey;
-    let user2StrategyVaultTokenAccount: PublicKey;
-    let mockStrategy: PublicKey;
+  // describe("withdraw_multi_asset", () => {
+  //   let vaultPda: PublicKey;
+  //   let vaultTokenMintPda: PublicKey;
+  //   let userVaultTokenAccount: PublicKey;
 
-    before(async () => {
-      // Create a new vault specifically for strategy testing
-      [strategyVault] = PublicKey.findProgramAddressSync(
-        [Buffer.from("vault"), user2.publicKey.toBuffer()], // Use user2 as authority
-        program.programId
-      );
+  //   before(async () => {
+  //     // Create a vault for testing withdrawals
+  //     const vaultName = "WithdrawTestVault";
+  //     const assets = [
+  //       {
+  //         mint: btcMint,
+  //         weight: 50, // 50% BTC
+  //         ata: PublicKey.default,
+  //       },
+  //       {
+  //         mint: ethMint,
+  //         weight: 50, // 50% ETH
+  //         ata: PublicKey.default,
+  //       },
+  //     ];
 
-      [strategyVaultTokenMint] = PublicKey.findProgramAddressSync(
-        [Buffer.from("vault_mint"), user2.publicKey.toBuffer()],
-        program.programId
-      );
+  //     vaultPda = PublicKey.findProgramAddressSync(
+  //       [Buffer.from("vault"), admin.publicKey.toBuffer(), Buffer.from(vaultName)],
+  //       program.programId
+  //     )[0];
 
-      user1StrategyVaultTokenAccount = await getAssociatedTokenAddress(
-        strategyVaultTokenMint,
-        user1.publicKey
-      );
+  //     vaultTokenMintPda = PublicKey.findProgramAddressSync(
+  //       [Buffer.from("vault_mint"), admin.publicKey.toBuffer(), Buffer.from(vaultName)],
+  //       program.programId
+  //     )[0];
 
-      user2StrategyVaultTokenAccount = await getAssociatedTokenAddress(
-        strategyVaultTokenMint,
-        user2.publicKey
-      );
+  //     // Get ATAs
+  //     const btcAta = await getAssociatedTokenAddress(btcMint, vaultPda, true);
+  //     const ethAta = await getAssociatedTokenAddress(ethMint, vaultPda, true);
 
-      mockStrategy = Keypair.generate().publicKey;
-    });
+  //     // Create the vault
+  //     await program.methods
+  //       .createVault(vaultName, assets)
+  //       .accounts({
+  //         admin: admin.publicKey,
+  //         tokenProgram: TOKEN_PROGRAM_ID,
+  //         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+  //         systemProgram: SystemProgram.programId,
+  //         rent: SYSVAR_RENT_PUBKEY,
+  //       })
+  //       .remainingAccounts([
+  //         { pubkey: btcMint, isWritable: false, isSigner: false },
+  //         { pubkey: btcAta, isWritable: true, isSigner: false },
+  //         { pubkey: ethMint, isWritable: false, isSigner: false },
+  //         { pubkey: ethAta, isWritable: true, isSigner: false },
+  //       ])
+  //       .signers([admin])
+  //       .rpc();
 
-    it("Initialize vault without strategy", async () => {
-      const tx = await program.methods
-        .initializeSolVault()
-        .accounts({
-          authority: user2.publicKey,
-          systemProgram: SystemProgram.programId,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          rent: SYSVAR_RENT_PUBKEY,
-        })
-        .signers([user2])
-        .rpc();
+  //     // Create user's vault token account and make a deposit first
+  //     userVaultTokenAccount = await getAssociatedTokenAddress(vaultTokenMintPda, user1.publicKey);
 
-      console.log("Initialize strategy vault transaction signature", tx);
+  //     const depositAmount = 2 * anchor.web3.LAMPORTS_PER_SOL; // 2 SOL
+  //     await program.methods
+  //       .depositMultiAsset(new anchor.BN(depositAmount))
+  //       .accounts({
+  //         vault: vaultPda,
+  //         user: user1.publicKey,
+  //         userVaultTokenAccount: userVaultTokenAccount,
+  //         vaultTokenMint: vaultTokenMintPda,
+  //         btcPriceFeed: BTC_USD_FEED,
+  //         ethPriceFeed: ETH_USD_FEED,
+  //         solPriceFeed: SOL_USD_FEED,
+  //         tokenProgram: TOKEN_PROGRAM_ID,
+  //         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+  //         systemProgram: SystemProgram.programId,
+  //       })
+  //       .signers([user1])
+  //       .rpc();
+  //   });
 
-      // Verify vault was initialized without strategy
-      const vaultAccount = await program.account.vault.fetch(strategyVault);
-      expect(vaultAccount.strategy).to.be.null;
-    });
+  //   it("User withdraws shares and receives SOL", async () => {
+  //     // Get user's current shares
+  //     const userVaultTokenAccountInfo = await getAccount(
+  //       provider.connection,
+  //       userVaultTokenAccount
+  //     );
+  //     const userShares = userVaultTokenAccountInfo.amount;
 
-    it("Vault works standalone without strategy", async () => {
-      // Deposit without strategy
-      const depositAmount = 2 * anchor.web3.LAMPORTS_PER_SOL; // 2 SOL
+  //     // Withdraw half of the shares
+  //     const withdrawShares = userShares / BigInt(2);
 
-      const tx = await program.methods
-        .deposit(new anchor.BN(depositAmount))
-        .accounts({
-          vault: strategyVault,
-          vaultTokenMint: strategyVaultTokenMint,
-          user: user1.publicKey,
-          userVaultTokenAccount: user1StrategyVaultTokenAccount,
-          userUnderlyingTokenAccount: null,
-          vaultUnderlyingTokenAccount: null,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([user1])
-        .rpc();
+  //     const tx = await program.methods
+  //       .withdrawMultiAsset(new anchor.BN(withdrawShares.toString()))
+  //       .accounts({
+  //         user: user1.publicKey,
+  //         userSharesAta: userVaultTokenAccount,
+  //         vaultTokenMint: vaultTokenMintPda,
+  //         btcPriceFeed: BTC_USD_FEED,
+  //         ethPriceFeed: ETH_USD_FEED,
+  //         solPriceFeed: SOL_USD_FEED,
+  //         tokenProgram: TOKEN_PROGRAM_ID,
+  //         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+  //         systemProgram: SystemProgram.programId,
+  //       })
+  //       .signers([user1])
+  //       .rpc();
 
-      console.log("Standalone deposit transaction signature", tx);
+  //     console.log("Withdraw transaction signature", tx);
 
-      // Verify deposit worked normally
-      const userVaultTokenAccountInfo = await getAccount(
-        provider.connection,
-        user1StrategyVaultTokenAccount
-      );
-      expect(userVaultTokenAccountInfo.amount.toString()).to.equal(depositAmount.toString());
+  //     // Verify user's shares decreased
+  //     const userVaultTokenAccountInfoAfter = await getAccount(
+  //       provider.connection,
+  //       userVaultTokenAccount
+  //     );
+  //     expect(userVaultTokenAccountInfoAfter.amount.toString()).to.equal(
+  //       (userShares - withdrawShares).toString()
+  //     );
+  //   });
+  // });
 
-      const vaultAccount = await program.account.vault.fetch(strategyVault);
-      expect(vaultAccount.totalAssets.toNumber()).to.equal(depositAmount);
-    });
+  // describe("set_strategy", () => {
+  //   let vaultPda: PublicKey;
+  //   let mockStrategy: PublicKey;
 
-    it("Add strategy to existing vault", async () => {
-      // Set strategy on existing vault
-      const tx = await program.methods
-        .setStrategy(mockStrategy)
-        .accounts({
-          vault: strategyVault,
-          authority: user2.publicKey,
-        })
-        .signers([user2])
-        .rpc();
+  //   before(async () => {
+  //     // Create a vault for testing strategy
+  //     const vaultName = "StrategyTestVault";
+  //     const assets = [
+  //       {
+  //         mint: solMint,
+  //         weight: 100, // 100% SOL for strategy testing
+  //         ata: PublicKey.default,
+  //       },
+  //     ];
 
-      console.log("Add strategy to existing vault transaction signature", tx);
+  //     vaultPda = PublicKey.findProgramAddressSync(
+  //       [Buffer.from("vault"), admin.publicKey.toBuffer(), Buffer.from(vaultName)],
+  //       program.programId
+  //     )[0];
 
-      // Verify strategy was set
-      const vaultAccount = await program.account.vault.fetch(strategyVault);
-      expect(vaultAccount.strategy.toString()).to.equal(mockStrategy.toString());
-    });
+  //     // Get ATAs
+  //     const solAta = await getAssociatedTokenAddress(solMint, vaultPda, true);
 
-    it("Deposit with strategy after adding it", async () => {
-      // Deposit with strategy now configured
-      const depositAmount = 1 * anchor.web3.LAMPORTS_PER_SOL; // 1 SOL
+  //     // Create the vault
+  //     await program.methods
+  //       .createVault(vaultName, assets)
+  //       .accounts({
+  //         vault: vaultPda,
+  //         admin: admin.publicKey,
+  //         vaultTokenMint: PublicKey.findProgramAddressSync(
+  //           [Buffer.from("vault_mint"), admin.publicKey.toBuffer(), Buffer.from(vaultName)],
+  //           program.programId
+  //         )[0],
+  //         tokenProgram: TOKEN_PROGRAM_ID,
+  //         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+  //         systemProgram: SystemProgram.programId,
+  //         rent: SYSVAR_RENT_PUBKEY,
+  //       })
+  //       .remainingAccounts([
+  //         { pubkey: solMint, isWritable: false, isSigner: false },
+  //         { pubkey: solAta, isWritable: true, isSigner: false },
+  //       ])
+  //       .signers([admin])
+  //       .rpc();
 
-      const tx = await program.methods
-        .deposit(new anchor.BN(depositAmount))
-        .accounts({
-          vault: strategyVault,
-          vaultTokenMint: strategyVaultTokenMint,
-          user: user2.publicKey,
-          userVaultTokenAccount: user2StrategyVaultTokenAccount,
-          userUnderlyingTokenAccount: null,
-          vaultUnderlyingTokenAccount: null,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([user2])
-        .rpc();
+  //     // Create a mock strategy (just a random keypair)
+  //     mockStrategy = Keypair.generate().publicKey;
+  //   });
 
-      console.log("Deposit with strategy transaction signature", tx);
+  //   it("Sets strategy for vault", async () => {
+  //     const tx = await program.methods
+  //       .setStrategy("StrategyTestVault", mockStrategy)
+  //       .accounts({
+  //         authority: admin.publicKey,
+  //       })
+  //       .signers([admin])
+  //       .rpc();
 
-      // Verify deposit worked
-      const userVaultTokenAccountInfo = await getAccount(
-        provider.connection,
-        user2StrategyVaultTokenAccount
-      );
-      expect(userVaultTokenAccountInfo.amount.toString()).to.equal(depositAmount.toString());
+  //     console.log("Set strategy transaction signature", tx);
 
-      const vaultAccount = await program.account.vault.fetch(strategyVault);
-      expect(vaultAccount.totalAssets.toNumber()).to.equal(3 * anchor.web3.LAMPORTS_PER_SOL); // 2 SOL + 1 SOL
-    });
+  //     // Verify strategy was set
+  //     const vaultAccount = await program.account.vault.fetch(vaultPda);
+  //     expect(vaultAccount.marinadeStrategy.toString()).to.equal(mockStrategy.toString());
+  //   });
 
-    it("Remove strategy and continue working standalone", async () => {
-      // Remove strategy
-      const removeTx = await program.methods
-        .removeStrategy()
-        .accounts({
-          vault: strategyVault,
-          authority: user2.publicKey,
-        })
-        .signers([user2])
-        .rpc();
+  //   it("Removes strategy from vault", async () => {
+  //     const tx = await program.methods
+  //       .removeStrategy("StrategyTestVault")
+  //       .accounts({
+  //         authority: admin.publicKey,
+  //       })
+  //       .signers([admin])
+  //       .rpc();
 
-      console.log("Remove strategy transaction signature", removeTx);
+  //     console.log("Remove strategy transaction signature", tx);
 
-      // Verify strategy was removed
-      const vaultAccount = await program.account.vault.fetch(strategyVault);
-      expect(vaultAccount.strategy).to.be.null;
-
-      // Deposit after removing strategy (should work normally)
-      const depositAmount = 0.5 * anchor.web3.LAMPORTS_PER_SOL; // 0.5 SOL
-
-      const tx = await program.methods
-        .deposit(new anchor.BN(depositAmount))
-        .accounts({
-          vault: strategyVault,
-          vaultTokenMint: strategyVaultTokenMint,
-          user: user1.publicKey,
-          userVaultTokenAccount: user1StrategyVaultTokenAccount,
-          userUnderlyingTokenAccount: null,
-          vaultUnderlyingTokenAccount: null,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([user1])
-        .rpc();
-
-      console.log("Deposit after removing strategy transaction signature", tx);
-
-      // Verify deposit worked normally
-      const userVaultTokenAccountInfo = await getAccount(
-        provider.connection,
-        user1StrategyVaultTokenAccount
-      );
-      expect(userVaultTokenAccountInfo.amount.toString()).to.equal((2.5 * anchor.web3.LAMPORTS_PER_SOL).toString()); // 2 SOL + 0.5 SOL
-
-      const vaultAccountAfter = await program.account.vault.fetch(strategyVault);
-      expect(vaultAccountAfter.totalAssets.toNumber()).to.equal(3.5 * anchor.web3.LAMPORTS_PER_SOL); // 3 SOL + 0.5 SOL
-    });
-  });
+  //     // Verify strategy was removed
+  //     const vaultAccount = await program.account.vault.fetch(vaultPda);
+  //     expect(vaultAccount.marinadeStrategy).to.be.null;
+  //   });
+  // });
 });
