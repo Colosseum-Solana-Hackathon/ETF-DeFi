@@ -7,7 +7,7 @@ skip-lint = true
 
 [programs.devnet]
 etf_defi = "99r9oxGjw29EvJBKEyQreaM8Hj45pP5La2URP1swANCJ"
-vault = "AUXhyMXmb4Gwnspmtj6X97saUT2MDJAPVjKnBcipwhz2"
+vault = "BZAQS5pJ1nWKqmGmv76EJmNPEZWMV4BDebMarGcUSKGd"
 marinade_strategy = "H1Z8qhsV7SLPkmB8g3RtQ5yunzTiHQCCQyS9Sh5SPLpn"
 
 [registry]
@@ -19,3 +19,22 @@ wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 --exclude 'tests/helpers/**' 'tests/**/*.ts'"
+initialize-mock-oracle = "ts-node scripts/initialize-mock-oracle.ts"
+
+[test]
+startup_wait = 10000
+
+[test.validator]
+url = "https://api.devnet.solana.com"
+
+[[test.validator.clone]]
+address = "FsJ3A3u2vn5cTVofAjvy6y5kwABJAqYWpe4975bi2epH"  # Pyth Program
+
+[[test.validator.clone]]
+address = "HovQMDrbAgAYPCmHVSrezcSmkMtXSSUsLDFANExrZh2J"  # BTC/USD Price Feed
+
+[[test.validator.clone]]
+address = "JBu1AL4obBcCMqKBBxhpWCNUt136ijcuMZLFvTP7iWdB"  # ETH/USD Price Feed
+
+[[test.validator.clone]]
+address = "H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG"  # SOL/USD Price Feed

@@ -105,7 +105,7 @@ pub mod marinade_strategy {
             treasury_msol_account: ctx.accounts.treasury_msol_account.to_account_info(),
             get_msol_from: ctx.accounts.msol_ata.to_account_info(),
             get_msol_from_authority: ctx.accounts.strategy_account.to_account_info(),
-            transfer_sol_to: ctx.accounts.vault.to_account_info(),
+            transfer_sol_to: ctx.accounts.vault.to_account_info(), // Marinade requires system-owned account
             system_program: ctx.accounts.system_program.to_account_info(),
             token_program: ctx.accounts.token_program.to_account_info(),
         };
@@ -140,7 +140,7 @@ pub mod marinade_strategy {
         
         // For now, we'll return the mSOL balance directly
         // TODO: Parse Marinade state account to get accurate SOL value
-        let marinade_state_data = ctx.accounts.marinade_state.try_borrow_data()?;
+        let _marinade_state_data = ctx.accounts.marinade_state.try_borrow_data()?;
         
         // Simplified calculation (this should parse the actual Marinade state)
         // In production, you'd deserialize the Marinade state struct
@@ -152,7 +152,7 @@ pub mod marinade_strategy {
     }
 
     /// Close strategy account and return lamports to payer
-    pub fn close_strategy(ctx: Context<CloseStrategy>) -> Result<()> {
+    pub fn close_strategy(_ctx: Context<CloseStrategy>) -> Result<()> {
         msg!("Closing strategy account");
         Ok(())
     }

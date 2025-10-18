@@ -224,4 +224,79 @@ describe("Marinade Strategy Tests", () => {
       }
     });
   });
+
+  describe("Test 3: Unstake and Receive SOL with Yield", () => {
+    it("Should unstake mSOL and receive SOL back (potentially with yield)", async () => {
+      try {
+        // Get initial balances
+        const initialMsolBalance = (await getAccount(provider.connection, msolAta)).amount;
+        const initialVaultBalance = await provider.connection.getBalance(vault);
+
+        console.log("📊 Initial Balances:");
+        console.log(`  mSOL: ${Number(initialMsolBalance) / LAMPORTS_PER_SOL}`);
+        console.log(`  Vault SOL: ${initialVaultBalance / LAMPORTS_PER_SOL}`);
+
+        // Unstake all mSOL
+        const unstakeAmount = new BN(initialMsolBalance.toString());
+
+        const tx = await marinadeProgram.methods
+          .unstake(unstakeAmount)
+          .accounts({
+            vault,
+            marinadeState: marinadeAccounts.marinadeState,
+            msolMint: MSOL_MINT,
+            liqPoolMsolLeg: marinadeAccounts.liqPoolMsolLeg,
+            liqPoolSolLegPda: marinadeAccounts.liqPoolSolLegPda,
+            treasuryMsolAccount: marinadeAccounts.treasuryMsolAccount,
+            marinadeProgram: MARINADE_PROGRAM_ID,
+          })
+          .signers([authority])
+          .rpc({ commitment: "confirmed" });
+
+        console.log("Unstake transaction signature:", tx);
+        await provider.connection.confirmTransaction(tx, "confirmed");
+
+        // Get final balances
+        const finalMsolBalance = (await getAccount(provider.connection, msolAta)).amount;
+        const finalVaultBalance = await provider.connection.getBalance(vault);
+
+        // Calculate changes
+        const msolBurned = initialMsolBalance - finalMsolBalance;
+        const solReceived = finalVaultBalance - initialVaultBalance;
+
+        console.log("📊 Final Balances:");
+        console.log(`  mSOL: ${Number(finalMsolBalance) / LAMPORTS_PER_SOL}`);
+        console.log(`  Vault SOL: ${finalVaultBalance / LAMPORTS_PER_SOL}`);
+        
+        console.log("💰 Changes:");
+        console.log(`  mSOL burned: ${Number(msolBurned) / LAMPORTS_PER_SOL}`);
+        console.log(`  SOL received in vault: ${solReceived / LAMPORTS_PER_SOL}`);
+
+        // Calculate yield (if any)
+        // Note: On devnet, there might not be actual yield due to lack of time/epochs
+        const yieldAmount = solReceived - Number(msolBurned);
+        const yieldPercentage = (yieldAmount / Number(msolBurned)) * 100;
+
+        if (yieldAmount > 0) {
+          console.log(`Yield earned: ${yieldAmount / LAMPORTS_PER_SOL} SOL (${yieldPercentage.toFixed(4)}%)`);
+        } else if (yieldAmount < 0) {
+          console.log(`Net loss: ${Math.abs(yieldAmount) / LAMPORTS_PER_SOL} SOL (${Math.abs(yieldPercentage).toFixed(4)}%)`);
+          console.log("   Note: This is expected on devnet due to liquidity pool fees and lack of staking rewards");
+        } else {
+          console.log("Break-even: No yield or loss");
+        }
+
+        // Verify unstake worked
+        assert.isTrue(Number(msolBurned) > 0, "mSOL should have been burned");
+        assert.isTrue(solReceived > 0, "SOL should have been received");
+        assert.equal(Number(finalMsolBalance), 0, "All mSOL should be unstaked");
+
+        console.log("✅ Unstake completed successfully!");
+        console.log("Full cycle completed: SOL → mSOL → SOL");
+      } catch (error) {
+        console.error("Unstake error:", error);
+        throw error;
+      }
+    });
+  });
 });
