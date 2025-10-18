@@ -35,12 +35,10 @@ describe("Multi-Asset Vault Tests", () => {
   const program = anchor.workspace.Vault as Program<Vault>;
   const provider = anchor.getProvider();
 
-  // Switchboard On-Demand Pull Feed addresses on Devnet
-  // These are the official Switchboard feed PDAs on devnet
-  // Source: https://docs.switchboard.xyz/feeds
-  const BTC_USD_FEED = new PublicKey("8SXvChNYFhRq4EZuZvnhjrB3jJRQCv4k3P4W6hesH3Ee");
-  const ETH_USD_FEED = new PublicKey("HEvDEKuv8YyMpakwJz4Q6gKLWKQHKQRqkFqJvHrCzYbh");
-  const SOL_USD_FEED = new PublicKey("GvDMxPzN1sCj7L26YDK2HnMRXEQmQ2aemov8YBtPS7vR");
+  // Switchboard On-Demand Pull Feed on Devnet
+  const SOL_USD_FEED = new PublicKey("DAXAq94Y5nX2dDp15SdeBzYRqTn8viFf9Dxq4ws7rHec");
+  const BTC_USD_FEED = new PublicKey("DAXAq94Y5nX2dDp15SdeBzYRqTn8viFf9Dxq4ws7rHec");
+  const ETH_USD_FEED = new PublicKey("DAXAq94Y5nX2dDp15SdeBzYRqTn8viFf9Dxq4ws7rHec");
 
   let admin: Keypair;
   let user1: Keypair;
@@ -48,6 +46,7 @@ describe("Multi-Asset Vault Tests", () => {
   let btcMint: PublicKey;
   let ethMint: PublicKey;
   let solMint: PublicKey;
+  let mockOracle: PublicKey;
 
   before(async () => {
     // Load your existing Solana CLI keypair
@@ -57,6 +56,12 @@ describe("Multi-Asset Vault Tests", () => {
     );
     admin = Keypair.fromSecretKey(secretKey);
     
+    // Derive mock oracle PDA
+    [mockOracle] = PublicKey.findProgramAddressSync(
+      [Buffer.from("mock_oracle"), admin.publicKey.toBuffer()],
+      program.programId
+    );
+    
     // Create test keypairs
     user1 = Keypair.generate();
     user2 = Keypair.generate();
@@ -65,12 +70,7 @@ describe("Multi-Asset Vault Tests", () => {
     console.log("  Admin:", admin.publicKey.toString());
     console.log("  User1:", user1.publicKey.toString());
     console.log("  User2:", user2.publicKey.toString());
-
-    // Display Switchboard feed addresses
-    console.log("📊 Switchboard On-Demand Feeds (Devnet):");
-    console.log("  BTC/USD Feed:", BTC_USD_FEED.toString());
-    console.log("  ETH/USD Feed:", ETH_USD_FEED.toString());
-    console.log("  SOL/USD Feed:", SOL_USD_FEED.toString());
+    console.log("  Mock Oracle:", mockOracle.toString());
 
     // Create test token mints (BTC, ETH, SOL test tokens)
     btcMint = await createMint(
@@ -97,9 +97,9 @@ describe("Multi-Asset Vault Tests", () => {
       9 // SOL has 9 decimals
     );
 
-    console.log("  BTC Mint:", btcMint.toString());
-    console.log("  ETH Mint:", ethMint.toString());
-    console.log("  SOL Mint:", solMint.toString());
+    console.log("BTC Mint:", btcMint.toString());
+    console.log("ETH Mint:", ethMint.toString());
+    console.log("SOL Mint:", solMint.toString());
   });
 
   describe("create_vault", () => {
@@ -393,6 +393,7 @@ describe("Multi-Asset Vault Tests", () => {
     let vaultName: string;
     let btcAta: PublicKey;
     let ethAta: PublicKey;
+    let solAta: PublicKey;
 
     before(async () => {
       // Create a vault for testing deposits
@@ -400,12 +401,17 @@ describe("Multi-Asset Vault Tests", () => {
       const assets = [
         {
           mint: btcMint,
-          weight: 50, // 50% BTC
+          weight: 40, // 40% BTC
           ata: PublicKey.default,
         },
         {
           mint: ethMint,
-          weight: 50, // 50% ETH
+          weight: 30, // 30% ETH
+          ata: PublicKey.default,
+        },
+        {
+          mint: solMint,
+          weight: 30, // 30% SOL
           ata: PublicKey.default,
         },
       ];
@@ -423,6 +429,7 @@ describe("Multi-Asset Vault Tests", () => {
       // Get ATAs
       btcAta = await getAssociatedTokenAddress(btcMint, vaultPda, true);
       ethAta = await getAssociatedTokenAddress(ethMint, vaultPda, true);
+      solAta = await getAssociatedTokenAddress(solMint, vaultPda, true);
 
       // Create the vault
       await program.methods
@@ -435,6 +442,8 @@ describe("Multi-Asset Vault Tests", () => {
           { pubkey: btcAta, isWritable: true, isSigner: false },
           { pubkey: ethMint, isWritable: false, isSigner: false },
           { pubkey: ethAta, isWritable: true, isSigner: false },
+          { pubkey: solMint, isWritable: false, isSigner: false },
+          { pubkey: solAta, isWritable: true, isSigner: false },
         ])
         .signers([admin])
         .rpc();
@@ -454,37 +463,102 @@ describe("Multi-Asset Vault Tests", () => {
 
       // Create user's vault token account
       userVaultTokenAccount = await getAssociatedTokenAddress(vaultTokenMintPda, user1.publicKey);
+      
+      // Configure vault to use Mock Oracle
+      console.log("🔧 Configuring vault to use Mock Oracle...");
+      await (program.methods as any)
+        .setPriceSource(vaultName, { mockOracle: {} }, mockOracle)
+        .accounts({
+          vault: vaultPda,
+          authority: admin.publicKey,
+        })
+        .signers([admin])
+        .rpc();
+      console.log("✅ Vault configured to use Mock Oracle");
+      
+      // Verify mock oracle has prices
+      try {
+        const oracleData: any = await (program.account as any).mockPriceOracle.fetch(mockOracle);
+        console.log("📊 Current Oracle Prices:");
+        console.log("  BTC: $" + (oracleData.btcPrice.toNumber() / 1_000_000).toFixed(2));
+        console.log("  ETH: $" + (oracleData.ethPrice.toNumber() / 1_000_000).toFixed(2));
+        console.log("  SOL: $" + (oracleData.solPrice.toNumber() / 1_000_000).toFixed(2));
+        
+        if (oracleData.btcPrice.toNumber() === 0 || oracleData.ethPrice.toNumber() === 0 || oracleData.solPrice.toNumber() === 0) {
+          console.warn("⚠️  Warning: Oracle prices are zero. Run 'yarn update-prices' first!");
+        }
+      } catch (e) {
+        console.error("❌ Mock oracle not found or not readable. Run 'yarn run init-oracle' first!");
+        throw e;
+      }
     });
 
     it("User deposits SOL and receives correct shares", async () => {
+      // Update oracle prices to ensure they're fresh
+      const mockPrices = {
+        btcPrice: new anchor.BN(108277 * 1_000_000), // $108,277 in micro-USD
+        ethPrice: new anchor.BN(3876 * 1_000_000), // $3,876 in micro-USD
+        solPrice: new anchor.BN(184 * 1_000_000), // $184 in micro-USD
+      };
+      
+      await (program.methods as any)
+        .updateMockOracle(mockPrices.btcPrice, mockPrices.ethPrice, mockPrices.solPrice)
+        .accounts({
+          mockOracle: mockOracle,
+          authority: admin.publicKey,
+        })
+        .signers([admin])
+        .rpc();
+      console.log("✅ Oracle prices updated");
+      
       const depositAmount = 0.01 * anchor.web3.LAMPORTS_PER_SOL; // 0.01 SOL (small amount)
+
+      console.log("💰 Depositing", depositAmount / anchor.web3.LAMPORTS_PER_SOL, "SOL");
 
       const tx = await program.methods
         .depositMultiAsset(vaultName, new anchor.BN(depositAmount))
-        .accountsStrict({
+        .accounts({
           vault: vaultPda,
           user: user1.publicKey,
           userSharesAta: userVaultTokenAccount,
           vaultTokenMint: vaultTokenMintPda,
-          btcQuote: BTC_USD_FEED,
-          ethQuote: ETH_USD_FEED,
-          solQuote: SOL_USD_FEED,
+          btcQuote: PublicKey.default, // Not used with MockOracle
+          ethQuote: PublicKey.default, // Not used with MockOracle
+          solQuote: PublicKey.default, // Not used with MockOracle
           clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
           tokenProgram: TOKEN_PROGRAM_ID,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
           rent: SYSVAR_RENT_PUBKEY,
-        })
+        } as any)
         .remainingAccounts([
           { pubkey: btcMint, isWritable: false, isSigner: false },
           { pubkey: btcAta, isWritable: true, isSigner: false },
           { pubkey: ethMint, isWritable: false, isSigner: false },
           { pubkey: ethAta, isWritable: true, isSigner: false },
+          { pubkey: solMint, isWritable: false, isSigner: false },
+          { pubkey: solAta, isWritable: true, isSigner: false },
+          { pubkey: mockOracle, isWritable: false, isSigner: false }, // Mock Oracle for price fetching
         ])
         .signers([user1])
         .rpc();
 
       console.log("✅ Deposit transaction signature", tx);
+
+      // Get transaction details to see logs
+      const txDetails = await provider.connection.getTransaction(tx, {
+        maxSupportedTransactionVersion: 0,
+        commitment: "confirmed",
+      });
+
+      if (txDetails && txDetails.meta && txDetails.meta.logMessages) {
+        console.log("\n📋 Transaction Logs (price-related):");
+        txDetails.meta.logMessages.forEach((log) => {
+          if (log.includes("price") || log.includes("Price") || log.includes("TVL") || log.includes("shares")) {
+            console.log("  ", log);
+          }
+        });
+      }
 
       // Verify user received shares
       const userVaultTokenAccountInfo = await getAccount(
@@ -494,7 +568,16 @@ describe("Multi-Asset Vault Tests", () => {
       
       // First deposit should mint shares 1:1 with deposit value
       expect(Number(userVaultTokenAccountInfo.amount)).to.be.greaterThan(0);
-      console.log("✅ User received shares:", userVaultTokenAccountInfo.amount.toString());
+      console.log("\n✅ User received shares:", userVaultTokenAccountInfo.amount.toString());
+      
+      // Verify vault state
+      const vaultAccount: any = await program.account.vault.fetch(vaultPda);
+      console.log("📊 Vault State After Deposit:");
+      console.log("  Total Shares:", vaultAccount.totalShares?.toString() || "N/A");
+      console.log("  TVL (micro-USD):", vaultAccount.tvlUsd?.toString() || "N/A");
+      if (vaultAccount.tvlUsd) {
+        console.log("  TVL (USD): $" + (vaultAccount.tvlUsd.toNumber() / 1_000_000).toFixed(2));
+      }
     });
 
     it("Fails with zero deposit amount", async () => {
@@ -506,9 +589,9 @@ describe("Multi-Asset Vault Tests", () => {
             user: user1.publicKey,
             userSharesAta: userVaultTokenAccount,
             vaultTokenMint: vaultTokenMintPda,
-            btcQuote: BTC_USD_FEED,
-            ethQuote: ETH_USD_FEED,
-            solQuote: SOL_USD_FEED,
+            btcQuote: PublicKey.default,
+            ethQuote: PublicKey.default,
+            solQuote: PublicKey.default,
             clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
             tokenProgram: TOKEN_PROGRAM_ID,
             associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -520,6 +603,9 @@ describe("Multi-Asset Vault Tests", () => {
             { pubkey: btcAta, isWritable: true, isSigner: false },
             { pubkey: ethMint, isWritable: false, isSigner: false },
             { pubkey: ethAta, isWritable: true, isSigner: false },
+            { pubkey: solMint, isWritable: false, isSigner: false },
+            { pubkey: solAta, isWritable: true, isSigner: false },
+            { pubkey: mockOracle, isWritable: false, isSigner: false },
           ])
           .signers([user1])
           .rpc();

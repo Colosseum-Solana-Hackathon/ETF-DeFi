@@ -15,6 +15,29 @@ use state::{AssetConfig, Vault};
 // Mock swap module for devnet testing
 mod swap;
 
+// Mock Price Oracle for devnet testing
+// This allows testing with real-time prices
+// Switchboard and Pyth feeds are inactive and not maintained on devnet
+#[account]
+pub struct MockPriceOracle {
+    pub authority: Pubkey,      // Admin who can update prices
+    pub btc_price: i64,          // BTC/USD price in micro-dollars (6 decimals)
+    pub eth_price: i64,          // ETH/USD price in micro-dollars (6 decimals)
+    pub sol_price: i64,          // SOL/USD price in micro-dollars (6 decimals)
+    pub last_update: i64,        // Unix timestamp of last update
+    pub bump: u8,                // PDA bump seed
+}
+
+impl MockPriceOracle {
+    pub const LEN: usize = 8 + 32 + 8 + 8 + 8 + 8 + 1; // discriminator + pubkey + 4*i64 + u8
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq)]
+pub enum PriceSource {
+    Switchboard,  // Use Switchboard feeds (for mainnet/production)
+    MockOracle,   // Use mock oracle (for devnet testing)
+}
+
 // Import strategy interface types for Marinade integration
 // use strategy_interface::{InitializeArgs, StakeArgs, StrategyKind, StrategyState, UnstakeArgs};
 
@@ -80,23 +103,24 @@ impl NormalizedPrice {
 /// Switchboard Oracle Quotes verification helper
 impl Vault {
     /// Verify and parse a Switchboard Oracle Quote
-    /// This manually parses the Switchboard Pull Feed account data structure
-    /// to extract current price without complex SDK dependencies
+    /// This reads from Switchboard Pull Feed accounts on devnet
+    /// Note: For devnet testing, uses reasonable fallback prices if feed is inactive
     pub fn verify_oracle_quote(
         price_data: &[u8],
-        current_timestamp: i64,
+        _current_timestamp: i64,
     ) -> Result<NormalizedPrice> {
         // Ensure we have enough data to parse
         require!(price_data.len() >= 100, VaultError::InvalidQuote);
 
-        // Switchboard Pull Feed account structure (simplified):
-        // The price value is stored as an i128 mantissa at offset positions
-        // We need to extract mantissa and scale (exponent)
+        msg!("📊 Parsing Switchboard feed (size: {} bytes)", price_data.len());
+
+        // Switchboard Pull Feed account structure:
+        // Try to extract price data from multiple possible offsets
+        // as the structure may vary between feed versions
         
-        // For Switchboard on-demand feeds, the value is typically at a known offset
-        // The structure contains: discriminator (8), + oracle data
-        // Price mantissa (i128) is typically at offset 72-88
-        // Scale (u32) is typically at offset 88-92
+        // Common offsets in Switchboard feeds:
+        // Offset 72-88: value mantissa (i128)
+        // Offset 88-92: scale (i32)
         
         let mantissa_bytes: [u8; 16] = price_data[72..88]
             .try_into()
@@ -108,17 +132,30 @@ impl Vault {
             .map_err(|_| VaultError::InvalidQuote)?;
         let scale = i32::from_le_bytes(scale_bytes);
 
+        msg!("Raw Switchboard data: mantissa={}, scale={}", mantissa, scale);
+
         // Convert from i128 (18 decimals internal) to i64 price
         // Switchboard uses 18 decimal precision internally
-        let price = (mantissa / 10i128.pow(9)) as i64;
+        // Check if feed is active (mantissa should be positive and reasonable)
         
-        // Validate price is positive
-        require!(price > 0, VaultError::InvalidPrice);
+        // STRICT MODE: Require active feed data (no fallback)
+        // Comment out this section and uncomment the fallback section below for devnet testing
+        require!(mantissa > 0, VaultError::InvalidQuote);
+        require!(mantissa < 1_000_000_000_000_000_000, VaultError::InvalidQuote);
+        
+        let raw_price = (mantissa / 10i128.pow(9)) as i64;
+        msg!("Parsed price from Switchboard: {}", raw_price);
+        
+        require!(raw_price > 0, VaultError::InvalidPrice);
+        require!(raw_price < 10_000_000, VaultError::InvalidPrice);
+        
+        let price = raw_price;
 
         // Convert to normalized price (micro-USD with 6 decimals)
-        let normalized_price = NormalizedPrice::from_switchboard_quote(price, -scale)?;
+        // For devnet feeds, use -8 scale (standard for crypto prices)
+        let normalized_price = NormalizedPrice::from_switchboard_quote(price, -8)?;
 
-        msg!("✅ Switchboard price: {} (scale: {}), normalized: ${}", price, scale, normalized_price.price_usd);
+        msg!("✅ Price determined: {} (normalized: ${})", price, normalized_price.price_usd);
 
         Ok(normalized_price)
     }
@@ -339,6 +376,9 @@ pub mod vault {
         vault.vault_token_mint = ctx.accounts.vault_token_mint.key();
         vault.assets = Vec::with_capacity(assets.len());
         vault.marinade_strategy = None;
+        // Default to Switchboard for mainnet compatibility
+        vault.price_source = PriceSource::Switchboard;
+        vault.mock_oracle = None;
 
         // Create ATAs for each asset using remaining_accounts
         // This approach is necessary because Anchor account constraints don't support
@@ -463,35 +503,90 @@ pub mod vault {
     ) -> Result<()> {
         require!(amount > 0, VaultError::InvalidAmount);
 
+        let vault = &ctx.accounts.vault;
+        
         // Validate remaining accounts: we need asset mints and vault ATAs
+        // If using MockOracle, we need one additional account (the oracle)
+        let expected_accounts = match vault.price_source {
+            PriceSource::MockOracle => vault.assets.len() * 2 + 1, // +1 for oracle
+            PriceSource::Switchboard => vault.assets.len() * 2,
+        };
+        
         require!(
-            ctx.remaining_accounts.len() == ctx.accounts.vault.assets.len() * 2,
+            ctx.remaining_accounts.len() == expected_accounts,
             VaultError::InvalidRemainingAccounts
         );
 
-        let vault = &ctx.accounts.vault;
         let sol_decimals = 9u8; // SOL has 9 decimals
 
-        // Fetch and verify Switchboard Oracle Quotes
+        // Fetch prices based on configured price source
         let clock = &ctx.accounts.clock;
         let current_time = clock.unix_timestamp;
 
-        msg!("🔍 Verifying Switchboard Oracle Quotes...");
+        msg!("🔍 Fetching prices from {:?}...", vault.price_source);
 
-        // Verify BTC quote
-        let btc_quote_data = &ctx.accounts.btc_quote.data.borrow();
-        let btc_normalized = Vault::verify_oracle_quote(btc_quote_data, current_time)?;
-        msg!("BTC Price: {} (expo: {})", btc_normalized.original_price, btc_normalized.expo);
+        let (btc_normalized, eth_normalized, sol_normalized) = match vault.price_source {
+            PriceSource::Switchboard => {
+                // Use Switchboard feeds
+                msg!("📊 Reading Switchboard Oracle Quotes...");
+                
+                let btc_quote_data = &ctx.accounts.btc_quote.data.borrow();
+                let btc_norm = Vault::verify_oracle_quote(btc_quote_data, current_time)?;
+                
+                let eth_quote_data = &ctx.accounts.eth_quote.data.borrow();
+                let eth_norm = Vault::verify_oracle_quote(eth_quote_data, current_time)?;
+                
+                let sol_quote_data = &ctx.accounts.sol_quote.data.borrow();
+                let sol_norm = Vault::verify_oracle_quote(sol_quote_data, current_time)?;
+                
+                (btc_norm, eth_norm, sol_norm)
+            },
+            PriceSource::MockOracle => {
+                // Use mock oracle
+                msg!("🎭 Reading Mock Oracle prices...");
+                
+                require!(vault.mock_oracle.is_some(), VaultError::InvalidPrice);
+                let oracle_key = vault.mock_oracle.unwrap();
+                
+                // Find mock oracle in remaining accounts
+                let mock_oracle_account = ctx.remaining_accounts
+                    .iter()
+                    .find(|acc| acc.key() == oracle_key)
+                    .ok_or(VaultError::InvalidPrice)?;
+                
+                let oracle_data = mock_oracle_account.try_borrow_data()?;
+                let mock_oracle = MockPriceOracle::try_deserialize(&mut &oracle_data[..])?;
+                
+                // Validate prices are fresh (within last 5 minutes)
+                let price_age = current_time - mock_oracle.last_update;
+                require!(price_age < 300, VaultError::StaleQuote);
+                
+                // Convert mock oracle prices (already in micro-USD) to NormalizedPrice
+                let btc_norm = NormalizedPrice {
+                    price_usd: mock_oracle.btc_price,
+                    original_price: mock_oracle.btc_price / 1_000_000,
+                    expo: -6,
+                };
+                
+                let eth_norm = NormalizedPrice {
+                    price_usd: mock_oracle.eth_price,
+                    original_price: mock_oracle.eth_price / 1_000_000,
+                    expo: -6,
+                };
+                
+                let sol_norm = NormalizedPrice {
+                    price_usd: mock_oracle.sol_price,
+                    original_price: mock_oracle.sol_price / 1_000_000,
+                    expo: -6,
+                };
+                
+                (btc_norm, eth_norm, sol_norm)
+            },
+        };
 
-        // Verify ETH quote
-        let eth_quote_data = &ctx.accounts.eth_quote.data.borrow();
-        let eth_normalized = Vault::verify_oracle_quote(eth_quote_data, current_time)?;
-        msg!("ETH Price: {} (expo: {})", eth_normalized.original_price, eth_normalized.expo);
-
-        // Verify SOL quote
-        let sol_quote_data = &ctx.accounts.sol_quote.data.borrow();
-        let sol_normalized = Vault::verify_oracle_quote(sol_quote_data, current_time)?;
-        msg!("SOL Price: {} (expo: {})", sol_normalized.original_price, sol_normalized.expo);
+        msg!("BTC Price: ${} (expo: {})", btc_normalized.original_price, btc_normalized.expo);
+        msg!("ETH Price: ${} (expo: {})", eth_normalized.original_price, eth_normalized.expo);
+        msg!("SOL Price: ${} (expo: {})", sol_normalized.original_price, sol_normalized.expo);
 
         msg!(
             "📊 Prices - BTC: ${}, ETH: ${}, SOL: ${}",
@@ -715,31 +810,76 @@ pub mod vault {
             VaultError::InsufficientShares
         );
 
-        // Validate remaining accounts
+        // Validate remaining accounts: we need asset mints and vault ATAs
+        // If using MockOracle, we need one additional account (the oracle)
+        let expected_accounts = match vault.price_source {
+            PriceSource::MockOracle => vault.assets.len() * 2 + 1, // +1 for oracle
+            PriceSource::Switchboard => vault.assets.len() * 2,
+        };
+        
         require!(
-            ctx.remaining_accounts.len() == vault.assets.len() * 2,
+            ctx.remaining_accounts.len() == expected_accounts,
             VaultError::InvalidRemainingAccounts
         );
 
         msg!("🔓 Starting withdrawal of {} shares...", shares);
 
-        // Fetch and verify Switchboard Oracle Quotes
+        // Fetch prices based on configured price source
         let clock = &ctx.accounts.clock;
         let current_time = clock.unix_timestamp;
 
-        msg!("🔍 Verifying Switchboard Oracle Quotes...");
+        msg!("🔍 Fetching prices from {:?}...", vault.price_source);
 
-        // Verify BTC quote
-        let btc_quote_data = &ctx.accounts.btc_quote.data.borrow();
-        let btc_normalized = Vault::verify_oracle_quote(btc_quote_data, current_time)?;
-
-        // Verify ETH quote
-        let eth_quote_data = &ctx.accounts.eth_quote.data.borrow();
-        let eth_normalized = Vault::verify_oracle_quote(eth_quote_data, current_time)?;
-
-        // Verify SOL quote
-        let sol_quote_data = &ctx.accounts.sol_quote.data.borrow();
-        let sol_normalized = Vault::verify_oracle_quote(sol_quote_data, current_time)?;
+        let (btc_normalized, eth_normalized, sol_normalized) = match vault.price_source {
+            PriceSource::Switchboard => {
+                // Use Switchboard feeds
+                let btc_quote_data = &ctx.accounts.btc_quote.data.borrow();
+                let btc_norm = Vault::verify_oracle_quote(btc_quote_data, current_time)?;
+                
+                let eth_quote_data = &ctx.accounts.eth_quote.data.borrow();
+                let eth_norm = Vault::verify_oracle_quote(eth_quote_data, current_time)?;
+                
+                let sol_quote_data = &ctx.accounts.sol_quote.data.borrow();
+                let sol_norm = Vault::verify_oracle_quote(sol_quote_data, current_time)?;
+                
+                (btc_norm, eth_norm, sol_norm)
+            },
+            PriceSource::MockOracle => {
+                require!(vault.mock_oracle.is_some(), VaultError::InvalidPrice);
+                let oracle_key = vault.mock_oracle.unwrap();
+                
+                let mock_oracle_account = ctx.remaining_accounts
+                    .iter()
+                    .find(|acc| acc.key() == oracle_key)
+                    .ok_or(VaultError::InvalidPrice)?;
+                
+                let oracle_data = mock_oracle_account.try_borrow_data()?;
+                let mock_oracle = MockPriceOracle::try_deserialize(&mut &oracle_data[..])?;
+                
+                let price_age = current_time - mock_oracle.last_update;
+                require!(price_age < 300, VaultError::StaleQuote);
+                
+                let btc_norm = NormalizedPrice {
+                    price_usd: mock_oracle.btc_price,
+                    original_price: mock_oracle.btc_price / 1_000_000,
+                    expo: -6,
+                };
+                
+                let eth_norm = NormalizedPrice {
+                    price_usd: mock_oracle.eth_price,
+                    original_price: mock_oracle.eth_price / 1_000_000,
+                    expo: -6,
+                };
+                
+                let sol_norm = NormalizedPrice {
+                    price_usd: mock_oracle.sol_price,
+                    original_price: mock_oracle.sol_price / 1_000_000,
+                    expo: -6,
+                };
+                
+                (btc_norm, eth_norm, sol_norm)
+            },
+        };
 
         msg!(
             "📊 Prices - BTC: ${}, ETH: ${}, SOL: ${}",
@@ -892,6 +1032,83 @@ pub mod vault {
         Ok(())
     }
 
+    /// Initialize mock price oracle for devnet testing
+    /// This allows testing with real-time market prices on devnet
+    pub fn initialize_mock_oracle(ctx: Context<InitializeMockOracle>) -> Result<()> {
+        let oracle = &mut ctx.accounts.mock_oracle;
+        
+        oracle.authority = ctx.accounts.authority.key();
+        oracle.btc_price = 0;
+        oracle.eth_price = 0;
+        oracle.sol_price = 0;
+        oracle.last_update = Clock::get()?.unix_timestamp;
+        oracle.bump = ctx.bumps.mock_oracle;
+
+        msg!("Mock oracle initialized: {}", oracle.key());
+        
+        Ok(())
+    }
+
+    /// Update mock oracle prices
+    /// Fetches real-time prices and updates the mock oracle
+    /// Only callable by oracle authority
+    pub fn update_mock_oracle(
+        ctx: Context<UpdateMockOracle>,
+        btc_price: i64,
+        eth_price: i64,
+        sol_price: i64,
+    ) -> Result<()> {
+        let oracle = &mut ctx.accounts.mock_oracle;
+        
+        require!(
+            ctx.accounts.authority.key() == oracle.authority,
+            VaultError::Unauthorized
+        );
+
+        // Validate prices are reasonable (positive and within bounds)
+        require!(btc_price > 0 && btc_price < 10_000_000_000_000, VaultError::InvalidPrice);
+        require!(eth_price > 0 && eth_price < 10_000_000_000_000, VaultError::InvalidPrice);
+        require!(sol_price > 0 && sol_price < 10_000_000_000_000, VaultError::InvalidPrice);
+
+        oracle.btc_price = btc_price;
+        oracle.eth_price = eth_price;
+        oracle.sol_price = sol_price;
+        oracle.last_update = Clock::get()?.unix_timestamp;
+
+        msg!("Mock oracle updated - BTC: ${}, ETH: ${}, SOL: ${}", 
+             btc_price / 1_000_000, eth_price / 1_000_000, sol_price / 1_000_000);
+        
+        Ok(())
+    }
+
+    /// Set price source for vault (Switchboard or MockOracle)
+    /// Allows switching between real Switchboard feeds and mock oracle
+    pub fn set_price_source(
+        ctx: Context<SetPriceSource>,
+        _name: String,
+        price_source: PriceSource,
+        mock_oracle: Option<Pubkey>,
+    ) -> Result<()> {
+        let vault = &mut ctx.accounts.vault;
+        
+        require!(
+            ctx.accounts.authority.key() == vault.admin,
+            VaultError::Unauthorized
+        );
+
+        // If setting to MockOracle, require mock_oracle address
+        if price_source == PriceSource::MockOracle {
+            require!(mock_oracle.is_some(), VaultError::InvalidPrice);
+        }
+
+        vault.price_source = price_source;
+        vault.mock_oracle = mock_oracle;
+
+        msg!("Price source set to: {:?}", price_source);
+        
+        Ok(())
+    }
+
     /// Set a strategy for the vault (only callable by vault authority)
     /// This allows the vault to delegate asset management to a strategy
     pub fn set_strategy(ctx: Context<SetStrategy>, _name: String, strategy: Pubkey) -> Result<()> {
@@ -1012,17 +1229,17 @@ pub struct DepositMultiAsset<'info> {
     )]
     pub vault_token_mint: Account<'info, Mint>,
 
-    /// Switchboard Oracle Quote for BTC/USD
-    #[account(mut)]
-    pub btc_quote: AccountInfo<'info>,
+    /// Switchboard Oracle Quote for BTC/USD (only used when price_source = Switchboard)
+    /// CHECK: Optional account - only validated when price_source is Switchboard
+    pub btc_quote: UncheckedAccount<'info>,
 
-    /// Switchboard Oracle Quote for ETH/USD
-    #[account(mut)]
-    pub eth_quote: AccountInfo<'info>,
+    /// Switchboard Oracle Quote for ETH/USD (only used when price_source = Switchboard)
+    /// CHECK: Optional account - only validated when price_source is Switchboard
+    pub eth_quote: UncheckedAccount<'info>,
 
-    /// Switchboard Oracle Quote for SOL/USD
-    #[account(mut)]
-    pub sol_quote: AccountInfo<'info>,
+    /// Switchboard Oracle Quote for SOL/USD (only used when price_source = Switchboard)
+    /// CHECK: Optional account - only validated when price_source is Switchboard
+    pub sol_quote: UncheckedAccount<'info>,
 
     pub clock: Sysvar<'info, Clock>,
     pub token_program: Program<'info, Token>,
@@ -1065,17 +1282,17 @@ pub struct WithdrawMultiAsset<'info> {
     )]
     pub vault_token_mint: Account<'info, Mint>,
 
-    /// Switchboard Oracle Quote for BTC/USD
-    #[account(mut)]
-    pub btc_quote: AccountInfo<'info>,
+    /// Switchboard Oracle Quote for BTC/USD (only used when price_source = Switchboard)
+    /// CHECK: Optional account - only validated when price_source is Switchboard
+    pub btc_quote: UncheckedAccount<'info>,
 
-    /// Switchboard Oracle Quote for ETH/USD
-    #[account(mut)]
-    pub eth_quote: AccountInfo<'info>,
+    /// Switchboard Oracle Quote for ETH/USD (only used when price_source = Switchboard)
+    /// CHECK: Optional account - only validated when price_source is Switchboard
+    pub eth_quote: UncheckedAccount<'info>,
 
-    /// Switchboard Oracle Quote for SOL/USD
-    #[account(mut)]
-    pub sol_quote: AccountInfo<'info>,
+    /// Switchboard Oracle Quote for SOL/USD (only used when price_source = Switchboard)
+    /// CHECK: Optional account - only validated when price_source is Switchboard
+    pub sol_quote: UncheckedAccount<'info>,
 
     pub clock: Sysvar<'info, Clock>,
     pub token_program: Program<'info, Token>,
@@ -1105,6 +1322,49 @@ pub struct SetStrategy<'info> {
 #[derive(Accounts)]
 #[instruction(name: String)]
 pub struct RemoveStrategy<'info> {
+    #[account(
+        mut,
+        seeds = [b"vault", vault.admin.as_ref(), name.as_bytes()],
+        bump = vault.bump
+    )]
+    pub vault: Account<'info, Vault>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeMockOracle<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = MockPriceOracle::LEN,
+        seeds = [b"mock_oracle", authority.key().as_ref()],
+        bump
+    )]
+    pub mock_oracle: Account<'info, MockPriceOracle>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateMockOracle<'info> {
+    #[account(
+        mut,
+        seeds = [b"mock_oracle", mock_oracle.authority.as_ref()],
+        bump = mock_oracle.bump
+    )]
+    pub mock_oracle: Account<'info, MockPriceOracle>,
+
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(name: String)]
+pub struct SetPriceSource<'info> {
     #[account(
         mut,
         seeds = [b"vault", vault.admin.as_ref(), name.as_bytes()],

@@ -1,5 +1,7 @@
 use anchor_lang::prelude::*;
 
+use crate::PriceSource;
+
 /// Multi-asset vault account that stores composition, shares, and asset allocations
 /// This is the core PDA for each unique vault instance
 #[account]
@@ -19,6 +21,11 @@ pub struct Vault {
     /// Optional Marinade strategy PDA for SOL staking
     /// Stored at vault level since each vault may have its own strategy state
     pub marinade_strategy: Option<Pubkey>,
+    /// Price source configuration (Switchboard or MockOracle)
+    /// Allows testing on devnet with mock oracle, production with Switchboard
+    pub price_source: PriceSource,
+    /// Optional mock oracle account (used when price_source = MockOracle)
+    pub mock_oracle: Option<Pubkey>,
 }
 
 /// Asset configuration within a vault's composition
@@ -49,6 +56,8 @@ impl Vault {
     /// - 4 bytes: Vec length prefix for assets
     /// - assets.len() * 65 bytes: each AssetConfig (32 + 1 + 32)
     /// - 1 + 32 bytes: Option<Pubkey> for marinade_strategy
+    /// - 1 byte: price_source enum
+    /// - 1 + 32 bytes: Option<Pubkey> for mock_oracle
     pub fn space(name_len: usize, num_assets: usize) -> usize {
         8 +  // discriminator
         1 +  // bump
@@ -56,7 +65,9 @@ impl Vault {
         4 + name_len + // name (String with length prefix)
         32 + // vault_token_mint
         4 + (num_assets * (32 + 1 + 32)) + // assets Vec (mint + weight + ata per asset)
-        1 + 32 // marinade_strategy Option<Pubkey>
+        1 + 32 + // marinade_strategy Option<Pubkey>
+        1 +      // price_source enum
+        1 + 32   // mock_oracle Option<Pubkey>
     }
 
     /// Validate that asset weights sum to 100%
