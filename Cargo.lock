@@ -2848,6 +2848,7 @@ dependencies = [
  "anchor-spl",
  "borsh 0.10.4",
  "bytemuck",
+ "marinade-strategy",
  "strategy-interface",
 ]
 

@@ -25,5 +25,6 @@ anchor-debug = []
 anchor-lang = {version = "0.31.1", features = ["init-if-needed"]}
 anchor-spl = "0.31.1"
 strategy-interface = { path = "../../crates/strategy-interface" }
+marinade-strategy = { path = "../marinade_strategy", features = ["cpi"] }
 borsh = "0.10.3"
 bytemuck = "1.14"

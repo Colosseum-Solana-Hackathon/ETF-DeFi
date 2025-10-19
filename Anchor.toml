@@ -7,8 +7,8 @@ skip-lint = true
 
 [programs.devnet]
 etf_defi = "99r9oxGjw29EvJBKEyQreaM8Hj45pP5La2URP1swANCJ"
-vault = "BZAQS5pJ1nWKqmGmv76EJmNPEZWMV4BDebMarGcUSKGd"
-marinade_strategy = "H1Z8qhsV7SLPkmB8g3RtQ5yunzTiHQCCQyS9Sh5SPLpn"
+vault = "FsoSA6MxmuQ6yz9ZJ9EqmizYLZq8KoVWnoudpv1Yww8u"
+marinade_strategy = "Eud9MdyGy8HdBzfv6kjKio1uagRWdn69821ajBs7DeqK"
 
 [registry]
 url = "https://api.apr.dev"

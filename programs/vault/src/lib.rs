@@ -309,7 +309,7 @@ pub struct WithdrawEvent {
   pub tvl_usd: i64,
 }
 
-declare_id!("BZAQS5pJ1nWKqmGmv76EJmNPEZWMV4BDebMarGcUSKGd");
+declare_id!("FsoSA6MxmuQ6yz9ZJ9EqmizYLZq8KoVWnoudpv1Yww8u");
 
 #[program]
 pub mod vault {
@@ -496,9 +496,9 @@ pub mod vault {
     /// 4. Allocate SOL across vault assets based on weights
     /// 5. Execute mock swaps to achieve target allocation
     /// 6. Mint vault shares proportional to deposit value
-    pub fn deposit_multi_asset(
-        ctx: Context<DepositMultiAsset>,
-        name: String,
+    pub fn deposit_multi_asset<'info>(
+        ctx: Context<'_, '_, '_, 'info, DepositMultiAsset<'info>>,
+        _name: String,
         amount: u64,
     ) -> Result<()> {
         require!(amount > 0, VaultError::InvalidAmount);
@@ -507,10 +507,21 @@ pub mod vault {
         
         // Validate remaining accounts: we need asset mints and vault ATAs
         // If using MockOracle, we need one additional account (the oracle)
-        let expected_accounts = match vault.price_source {
+        // If Marinade strategy is set, we need one more account (the strategy)
+        let mut expected_accounts = match vault.price_source {
             PriceSource::MockOracle => vault.assets.len() * 2 + 1, // +1 for oracle
             PriceSource::Switchboard => vault.assets.len() * 2,
         };
+        
+        if vault.marinade_strategy.is_some() {
+            expected_accounts += 1;
+        }
+        
+        msg!(
+            "Remaining accounts validation: expected {}, got {}",
+            expected_accounts,
+            ctx.remaining_accounts.len()
+        );
         
         require!(
             ctx.remaining_accounts.len() == expected_accounts,
@@ -689,6 +700,8 @@ pub mod vault {
         // STEP 7: Allocate SOL across vault assets using MockSwap
         msg!("🔄 Allocating deposit across vault assets...");
 
+        let mut sol_to_stake: Option<u64> = None;
+
         for (i, asset) in vault.assets.iter().enumerate() {
             let usd_allocation = (deposit_usd_micro * asset.weight as i64) / 100;
             let sol_amount_for_asset = (amount as i64 * asset.weight as i64 / 100) as u64;
@@ -697,13 +710,17 @@ pub mod vault {
             let (decimals, price, asset_name) = match asset.weight {
                 40 => (8u8, &btc_normalized, "BTC"),  // BTC - needs swap
                 30 if i == 1 => (18u8, &eth_normalized, "ETH"), // ETH - needs swap
-                30 => (9u8, &sol_normalized, "SOL"),  // SOL - no swap needed
+                30 => {
+                    // Store SOL amount for Marinade staking
+                    sol_to_stake = Some(sol_amount_for_asset);
+                    (9u8, &sol_normalized, "SOL")
+                },
                 _ => continue,
             };
 
             // Calculate token amount using MockSwap for BTC and ETH
             let token_amount = if asset_name == "SOL" {
-                // For SOL, no swap needed - amount is already in SOL
+                // For SOL, no swap needed - amount will be staked via Marinade
                 sol_amount_for_asset
             } else {
                 // For BTC and ETH, use MockSwap to calculate swap output
@@ -730,9 +747,60 @@ pub mod vault {
 
             // NOTE: For devnet, MockSwap only calculates amounts
             // In production with Jupiter, actual swaps would execute here:
-            // - For SOL: Already in vault (no swap needed)
             // - For BTC/ETH: Execute Jupiter CPI (SOL -> BTC/ETH)
-            // Assets would then be deposited into vault ATAs
+            // - For SOL: Delegate to Marinade strategy
+        }
+
+        // Delegate SOL portion to Marinade strategy (if configured)
+        if let (Some(strategy_key), Some(stake_amount)) = (vault.marinade_strategy, sol_to_stake) {
+            msg!("🌊 Marinade strategy configured!");
+            msg!("   Delegating {} lamports (30%) to Marinade...", stake_amount);
+            
+            // Find the strategy account in remaining_accounts
+            let strategy_account_info = ctx.remaining_accounts.iter()
+                .find(|acc| acc.key() == strategy_key)
+                .ok_or(VaultError::MarinadeError)?;
+            
+            // Build CPI context for marinade_strategy::stake
+            let cpi_accounts = marinade_strategy::cpi::accounts::Stake {
+                strategy_account: strategy_account_info.clone(),
+                vault: ctx.accounts.vault.to_account_info(),
+                payer: ctx.accounts.user.to_account_info(), // User must sign as payer
+                marinade_state: ctx.accounts.marinade_state.to_account_info(),
+                reserve_pda: ctx.accounts.reserve_pda.to_account_info(),
+                msol_mint: ctx.accounts.msol_mint.to_account_info(),
+                msol_ata: ctx.accounts.strategy_msol_ata.to_account_info(),
+                msol_mint_authority: ctx.accounts.msol_mint_authority.to_account_info(),
+                liq_pool_sol_leg_pda: ctx.accounts.liq_pool_sol_leg_pda.to_account_info(),
+                liq_pool_msol_leg: ctx.accounts.liq_pool_msol_leg.to_account_info(),
+                liq_pool_msol_leg_authority: ctx.accounts.liq_pool_msol_leg_authority.to_account_info(),
+                marinade_program: ctx.accounts.marinade_program.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
+            };
+            
+            // Vault PDA signs the CPI call
+            let vault_seeds = &[
+                b"vault".as_ref(),
+                vault.admin.as_ref(),
+                vault.name.as_bytes(),
+                &[vault.bump],
+            ];
+            let signer_seeds = &[&vault_seeds[..]];
+            
+            let cpi_ctx = CpiContext::new_with_signer(
+                ctx.accounts.marinade_strategy_program.to_account_info(),
+                cpi_accounts,
+                signer_seeds,
+            );
+            
+            // Execute CPI call to marinade_strategy::stake
+            marinade_strategy::cpi::stake(cpi_ctx, stake_amount)?;
+            
+            msg!("✅Successfully delegated {} lamports to Marinade!", stake_amount);
+            
+        } else if sol_to_stake.is_some() {
+            msg!("No Marinade strategy configured - SOL will remain in vault");
         }
 
         // STEP 8: Mint shares to user
@@ -1241,6 +1309,56 @@ pub struct DepositMultiAsset<'info> {
     /// CHECK: Optional account - only validated when price_source is Switchboard
     pub sol_quote: UncheckedAccount<'info>,
 
+    // ========== Marinade Strategy Accounts (Optional - only if vault.marinade_strategy is set) ==========
+    
+    /// Marinade Strategy program (for CPI)
+    /// CHECK: This is the marinade_strategy program that wraps Marinade Finance
+    pub marinade_strategy_program: UncheckedAccount<'info>,
+    
+    /// Marinade Finance program (passed through to strategy)
+    /// CHECK: Validated as Marinade program ID when marinade_strategy is configured
+    pub marinade_program: UncheckedAccount<'info>,
+    
+    /// Marinade state account
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub marinade_state: UncheckedAccount<'info>,
+    
+    /// Marinade reserve PDA
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub reserve_pda: UncheckedAccount<'info>,
+    
+    /// mSOL token mint
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub msol_mint: UncheckedAccount<'info>,
+    
+    /// Strategy's mSOL ATA (receives mSOL from staking)
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub strategy_msol_ata: UncheckedAccount<'info>,
+    
+    /// mSOL mint authority
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub msol_mint_authority: UncheckedAccount<'info>,
+    
+    /// Liquidity pool SOL leg PDA
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub liq_pool_sol_leg_pda: UncheckedAccount<'info>,
+    
+    /// Liquidity pool mSOL leg
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub liq_pool_msol_leg: UncheckedAccount<'info>,
+    
+    /// Liquidity pool mSOL leg authority
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub liq_pool_msol_leg_authority: UncheckedAccount<'info>,
+
     pub clock: Sysvar<'info, Clock>,
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -1248,10 +1366,18 @@ pub struct DepositMultiAsset<'info> {
     pub rent: Sysvar<'info, Rent>,
     
     // remaining_accounts layout:
-    // For each asset in vault.assets:
-    //   [i*2]: Asset mint account (UncheckedAccount)
-    //   [i*2+1]: Vault's ATA for that asset (mut, UncheckedAccount)
+    // [0-5]: Asset mints and ATAs (3 assets × 2 accounts each)
+    //   [0]: BTC mint, [1]: BTC vault ATA
+    //   [2]: ETH mint, [3]: ETH vault ATA  
+    //   [4]: SOL mint, [5]: SOL vault ATA
+    // [6]: MockOracle account (if using MockOracle price source)
+    // [7]: Marinade strategy account (if marinade_strategy is configured)
 }
+
+/// Helper account to pass Marinade strategy account via remaining_accounts
+/// CHECK: This is validated against vault.marinade_strategy
+pub struct MarinadeStrategyAccount;
+
 
 #[derive(Accounts)]
 #[instruction(name: String)]
