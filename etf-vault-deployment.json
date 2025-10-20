@@ -1,0 +1,29 @@
+{
+  "vaultName": "SOL-BTC-ETH-Index",
+  "vaultPda": "CGL64zCov7WqvJm4moJKE3XMLGPLBvTaynCYDCPRVU2K",
+  "vaultTokenMint": "CGGbBTDZVXQc4G2f4Nm6je9GcMNUsQ1Kro1jR5zdTsci",
+  "admin": "59j61YR6iUtYxHaqL8bJutN9XLDwwJXrnYhVGC2uDsxu",
+  "assets": {
+    "btc": {
+      "mint": "CqcPvtoEthDVBKv8bDtGYEoDLjNCDyA41AQPRb3L8pxA",
+      "ata": "F4WaXu5c7gMPNweqYhXkdfYhyHhY322reXUJdnruew14",
+      "weight": 40
+    },
+    "eth": {
+      "mint": "66yFx2ySRRNxyhPRybdgzyWvFg3sVU6Erb7UhBgU2NS1",
+      "ata": "9NcpVk5H6VyFVdTH3YfgHSEYQP6kAPonBjwekYRsotid",
+      "weight": 30
+    },
+    "sol": {
+      "mint": "DBLEUSQtyVuNsyTR7qGt1iJ1D4Mx2woMTiEVejWFfxSQ",
+      "ata": "2B6TzsS5xMi3cRCwZTcgaZiUXuL3GEj7j2s4PgHMn2u5",
+      "weight": 30
+    }
+  },
+  "transaction": "3vnAeNiJ99tWDaNvN4BfHQFcXar3g4jSymN3GoFkw8vrLdA47yoQQ1gpicV7SVWBT3xq3mmLAde25jvr4p6iBMjx",
+  "timestamp": "2025-10-19T22:23:03.967Z",
+  "network": "devnet",
+  "programId": "FsoSA6MxmuQ6yz9ZJ9EqmizYLZq8KoVWnoudpv1Yww8u",
+  "mockOracle": "88Y7xK8ZzfQuYKjSM3Nqt6rvAkJLAoZAejU6z8piEUPo",
+  "priceSource": "MockOracle"
+}

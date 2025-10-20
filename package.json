@@ -7,7 +7,8 @@
     "test:devnet": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com anchor test --skip-local-validator --skip-deploy",
     "test-mock-oracle-direct-devnet": "ts-node scripts/test-mock-oracle-direct-devnet.ts",
     "init-oracle": "anchor run initialize-mock-oracle",
-    "update-prices": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana/id.json ts-node scripts/update-prices.ts"
+    "update-prices": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana/id.json ts-node scripts/update-prices.ts",
+    "deploy-etf": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana/id.json ts-node scripts/deploy-etf-vault.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",
