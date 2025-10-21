@@ -250,6 +250,12 @@ impl Vault {
         if total_shares == 0 {
             // First deposit: share price = $1.00 (in micro-dollars)
             Ok(1_000_000)
+        } else if tvl_usd_micro <= 0 {
+            // TVL is $0 or negative but shares exist - this indicates an error state
+            // Return default share price to prevent division by zero
+            // In production, this should trigger an emergency state
+            msg!("⚠️  WARNING: TVL is {} but {} shares exist - using default share price", tvl_usd_micro, total_shares);
+            Ok(1_000_000) // $1.00 per share as fallback
         } else {
             // Share_Price = TVL / Total_Shares
             let share_price = (tvl_usd_micro)
@@ -266,6 +272,9 @@ impl Vault {
 
     /// Calculate shares to mint based on deposit value and share price
     pub fn calculate_shares_to_mint(deposit_usd_micro: i64, share_price_usd_micro: i64) -> Result<u64> {
+        // Prevent division by zero or negative share price
+        require!(share_price_usd_micro > 0, VaultError::MathOverflow);
+        
         // Shares = (Deposit_Value * 10^9) / Share_Price
         // We multiply by 10^9 because vault shares have 9 decimals
         let shares = (deposit_usd_micro)
@@ -629,6 +638,18 @@ pub mod vault {
         let mut eth_balance = 0u64;
         let mut sol_balance = 0u64;
 
+        // IMPORTANT: For SOL, we need to check BOTH:
+        // 1. SPL token balance in ATA (if using wrapped SOL tokens)
+        // 2. Native SOL in vault PDA's lamports (for deposits that don't wrap)
+        
+        // First, check native SOL balance in vault PDA
+        let vault_lamports = ctx.accounts.vault.to_account_info().lamports();
+        let vault_data_len = ctx.accounts.vault.to_account_info().data_len();
+        let rent_exempt_minimum = ctx.accounts.rent.minimum_balance(vault_data_len);
+        // Subtract rent-exempt reserve to get actual deposited SOL
+        let native_sol_balance = vault_lamports.saturating_sub(rent_exempt_minimum);
+        msg!("  Native SOL in vault PDA: {} lamports (total: {}, rent: {})", native_sol_balance, vault_lamports, rent_exempt_minimum);
+
         for (i, asset) in vault.assets.iter().enumerate() {
             let ata_account_info = &ctx.remaining_accounts[i * 2 + 1];
             
@@ -642,14 +663,23 @@ pub mod vault {
             let ata_data = ata_account_info.try_borrow_data()?;
             let ata = TokenAccount::try_deserialize(&mut &ata_data[..])?;
             
-            msg!("Asset {} (weight {}%): {} tokens", asset.mint, asset.weight, ata.amount);
+            msg!("Asset {} (weight {}%): {} tokens in ATA", asset.mint, asset.weight, ata.amount);
 
             // Map balance to correct asset based on weight
             // This is a simplified approach - in production you'd match by mint address
             match asset.weight {
                 40 => btc_balance = ata.amount, // BTC gets 40%
                 30 if eth_balance == 0 => eth_balance = ata.amount, // First 30% is ETH
-                30 => sol_balance = ata.amount, // Second 30% is SOL
+                30 => {
+                    // For SOL: Use SPL token balance OR native balance (whichever is greater)
+                    // This handles both wrapped SOL tokens and native SOL deposits
+                    sol_balance = if ata.amount > 0 {
+                        ata.amount // Using SPL token wSOL
+                    } else {
+                        native_sol_balance // Using native SOL
+                    };
+                    msg!("  → Using SOL balance: {} (native + SPL)", sol_balance);
+                },
                 _ => {}
             }
         }

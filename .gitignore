@@ -7,3 +7,4 @@ test-ledger
 .yarn
 .env
 devnet-keypair.json
+admin-keypair.json
