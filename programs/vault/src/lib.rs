@@ -318,7 +318,7 @@ pub struct WithdrawEvent {
   pub tvl_usd: i64,
 }
 
-declare_id!("FsoSA6MxmuQ6yz9ZJ9EqmizYLZq8KoVWnoudpv1Yww8u");
+declare_id!("4CGJSLVrMmC3rznuUhJzTDtK6NH4sXXzLCun47W6dcSF");
 
 #[program]
 pub mod vault {
@@ -1073,21 +1073,14 @@ pub mod vault {
                 asset_value_usd
             );
 
-            // For SOL: Handle both SPL tokens and native SOL
+            // For SOL: We use native SOL from the vault PDA (not SPL tokens)
+            // Note: During deposits, SOL goes as native lamports, not SPL tokens
             // For BTC/ETH: Calculate equivalent SOL using MockSwap
             if asset_name == "SOL" {
-                // Check if we have SPL SOL tokens or native SOL
-                if amount_to_withdraw > 0 {
-                    // SPL token balance
-                    total_sol_to_return += amount_to_withdraw;
-                    sol_from_native += amount_to_withdraw;
-                } else {
-                    // Use native SOL balance
-                    let native_sol_to_withdraw = ((native_sol_balance as u128 * withdrawal_percentage) / 1_000_000) as u64;
-                    total_sol_to_return += native_sol_to_withdraw;
-                    sol_from_native += native_sol_to_withdraw;
-                    msg!("    → Using native SOL: {} lamports", native_sol_to_withdraw);
-                }
+                // SOL is stored as native lamports in the vault PDA
+                // We'll handle native SOL withdrawal after Marinade unstaking
+                // because we need to know how much is in Marinade vs vault
+                msg!("    → SOL will be withdrawn from vault native balance + Marinade");
             } else {
                 // For BTC/ETH: Only swap if we have a non-zero amount
                 if amount_to_withdraw > 0 {
@@ -1194,11 +1187,8 @@ pub mod vault {
                         
                         sol_from_marinade = sol_received_from_marinade;
                         
-                        // SOL is already in the receiver account, no need to transfer
-                        // The receiver account should be the user account in the test
-                        // Add to total SOL to return
-                        total_sol_to_return = total_sol_to_return.checked_add(sol_received_from_marinade)
-                            .ok_or(VaultError::MathOverflow)?;
+                        // SOL was already transferred to receiver by Marinade
+                        // Don't add to total_sol_to_return since it's not in the vault
                         
                         // Calculate yield
                         let proportional_initial = ((initial_staked as u128 * withdrawal_percentage) / 1_000_000) as u64;
@@ -1218,6 +1208,15 @@ pub mod vault {
             }
         }
 
+        // STEP 2.6: Calculate native SOL to withdraw from vault
+        // After Marinade unstaking, calculate how much SOL remains in the vault to withdraw
+        // The vault's native SOL = total deposited - amount staked in Marinade
+        let vault_native_sol_to_withdraw = ((native_sol_balance as u128 * withdrawal_percentage) / 1_000_000) as u64;
+        total_sol_to_return += vault_native_sol_to_withdraw;
+        sol_from_native = vault_native_sol_to_withdraw;
+        
+        msg!("   Vault native SOL withdrawal: {} lamports", vault_native_sol_to_withdraw);
+
         msg!(
             "💰 Total withdrawal value: ${} USD",
             total_withdrawal_value_usd
@@ -1228,12 +1227,12 @@ pub mod vault {
         );
         if sol_from_marinade > 0 {
             msg!(
-                "   SOL from Marinade (with yield, already sent to user): {} lamports",
+                "   SOL from Marinade (with yield, already sent to receiver): {} lamports",
                 sol_from_marinade
             );
         }
         msg!("   SOL to transfer from vault: {} lamports", total_sol_to_return);
-        msg!("   Total SOL user receives: {} lamports", total_sol_to_return + sol_from_marinade);
+        msg!("   Total SOL user will have received: {} lamports (vault: {}, marinade receiver: {})", total_sol_to_return + sol_from_marinade, total_sol_to_return, sol_from_marinade);
 
         // STEP 3: Transfer remaining SOL from vault to user
         // Note: Marinade SOL was already sent directly to user above

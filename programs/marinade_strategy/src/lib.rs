@@ -5,7 +5,7 @@ use marinade_cpi::program::MarinadeFinance;
 use marinade_cpi::cpi::accounts::{Deposit, LiquidUnstake};
 use marinade_cpi::cpi::{deposit as marinade_deposit, liquid_unstake as marinade_liquid_unstake};
 
-declare_id!("Eud9MdyGy8HdBzfv6kjKio1uagRWdn69821ajBs7DeqK");
+declare_id!("5QSX9wJvzkDzCT8mGewJGXgtiN7Hq4DqN4VZFhRiWuJh");
 
 // Marinade Finance program ID (mainnet/devnet)
 pub const MARINADE_PROGRAM_ID: &str = "MarBmsSgKXdrN1egZf5sqe1TMai9K1rChYNDJgjq7aD";
