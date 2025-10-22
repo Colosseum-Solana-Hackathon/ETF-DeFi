@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/strategy-interface",
-    "programs/etf-defi",
     "programs/vault",
     "programs/marinade_strategy",
     "crates/*"
