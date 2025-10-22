@@ -81,6 +81,8 @@ pub mod marinade_strategy {
     }
 
     /// Liquid unstake: Exchange mSOL for SOL through Marinade's liquidity pool
+    /// Note: Marinade requires a system-owned account to receive SOL
+    /// So we receive in the vault account (which should be a system account or passed through properly)
     pub fn unstake(ctx: Context<Unstake>, msol_amount: u64) -> Result<()> {
         require!(msol_amount > 0, ErrorCode::ZeroAmount);
         
@@ -97,6 +99,10 @@ pub mod marinade_strategy {
         ];
         let signer = &[&seeds[..]];
         
+        // Record receiver balance before unstaking
+        let receiver_balance_before = ctx.accounts.sol_receiver.lamports();
+        
+        // Marinade liquid_unstake requires transfer_sol_to to be system-owned
         let cpi_accounts = LiquidUnstake {
             state: ctx.accounts.marinade_state.to_account_info(),
             msol_mint: ctx.accounts.msol_mint.to_account_info(),
@@ -105,7 +111,7 @@ pub mod marinade_strategy {
             treasury_msol_account: ctx.accounts.treasury_msol_account.to_account_info(),
             get_msol_from: ctx.accounts.msol_ata.to_account_info(),
             get_msol_from_authority: ctx.accounts.strategy_account.to_account_info(),
-            transfer_sol_to: ctx.accounts.vault.to_account_info(), // Marinade requires system-owned account
+            transfer_sol_to: ctx.accounts.sol_receiver.to_account_info(),
             system_program: ctx.accounts.system_program.to_account_info(),
             token_program: ctx.accounts.token_program.to_account_info(),
         };
@@ -119,7 +125,14 @@ pub mod marinade_strategy {
         // Call Marinade liquid_unstake instruction
         marinade_liquid_unstake(cpi_ctx, msol_amount)?;
         
-        msg!("Liquid unstaked {} mSOL", msol_amount);
+        // Calculate SOL received
+        let receiver_balance_after = ctx.accounts.sol_receiver.lamports();
+        let sol_received = receiver_balance_after.saturating_sub(receiver_balance_before);
+        
+        // SOL is already in the receiver account, no need to transfer
+        // The receiver should be the final destination (user account)
+        
+        msg!("Liquid unstaked {} mSOL, received {} lamports SOL", msol_amount, sol_received);
         
         Ok(())
     }
@@ -259,9 +272,15 @@ pub struct Unstake<'info> {
     )]
     pub strategy_account: Account<'info, StrategyAccount>,
     
-    /// CHECK: Vault program account (receives SOL)
+    /// CHECK: Vault program account (final destination for SOL)
     #[account(mut)]
     pub vault: AccountInfo<'info>,
+    
+    /// System-owned account to receive SOL from Marinade (required by Marinade)
+    /// This will typically be the vault PDA passed as an UncheckedAccount
+    /// CHECK: Must be system-owned for Marinade to transfer SOL
+    #[account(mut)]
+    pub sol_receiver: AccountInfo<'info>,
     
     /// CHECK: Marinade state account - validated by Marinade program
     #[account(mut)]

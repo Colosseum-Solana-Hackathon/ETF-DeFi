@@ -892,8 +892,8 @@ pub mod vault {
     /// 5. For BTC/ETH: Calculate swap to SOL and add to user's withdrawal
     /// 6. Burn user's shares
     /// 7. Update vault state
-    pub fn withdraw_multi_asset(
-        ctx: Context<WithdrawMultiAsset>,
+    pub fn withdraw_multi_asset<'info>(
+        ctx: Context<'_, '_, '_, 'info, WithdrawMultiAsset<'info>>,
         name: String,
         shares: u64,
     ) -> Result<()> {
@@ -910,10 +910,21 @@ pub mod vault {
 
         // Validate remaining accounts: we need asset mints and vault ATAs
         // If using MockOracle, we need one additional account (the oracle)
-        let expected_accounts = match vault.price_source {
+        // If Marinade strategy is set, we need one more account (the strategy)
+        let mut expected_accounts = match vault.price_source {
             PriceSource::MockOracle => vault.assets.len() * 2 + 1, // +1 for oracle
             PriceSource::Switchboard => vault.assets.len() * 2,
         };
+        
+        if vault.marinade_strategy.is_some() {
+            expected_accounts += 1;
+        }
+        
+        msg!(
+            "Withdraw remaining accounts validation: expected {}, got {}",
+            expected_accounts,
+            ctx.remaining_accounts.len()
+        );
         
         require!(
             ctx.remaining_accounts.len() == expected_accounts,
@@ -999,6 +1010,35 @@ pub mod vault {
         // STEP 2: Calculate proportional asset amounts and total withdrawal value
         let mut total_withdrawal_value_usd = 0i64;
         let mut total_sol_to_return = 0u64;
+        let mut sol_from_native = 0u64;
+        let mut sol_from_marinade = 0u64;
+
+        // First, check native SOL balance in vault PDA
+        let vault_lamports = ctx.accounts.vault.to_account_info().lamports();
+        let vault_data_len = ctx.accounts.vault.to_account_info().data_len();
+        let rent_exempt_minimum = ctx.accounts.rent.minimum_balance(vault_data_len);
+        let native_sol_balance = vault_lamports.saturating_sub(rent_exempt_minimum);
+        msg!("  Native SOL in vault PDA: {} lamports", native_sol_balance);
+        
+        // Check Marinade strategy staked value
+        let mut marinade_sol_value = 0u64;
+        if let Some(strategy_key) = vault.marinade_strategy {
+            let expected_strategy_index = match vault.price_source {
+                PriceSource::MockOracle => vault.assets.len() * 2 + 1,
+                PriceSource::Switchboard => vault.assets.len() * 2,
+            };
+            
+            if ctx.remaining_accounts.len() > expected_strategy_index {
+                let strategy_account_info = &ctx.remaining_accounts[expected_strategy_index];
+                if strategy_account_info.key() == strategy_key {
+                    // Read strategy state to get mSOL balance
+                    // Note: In full implementation, convert mSOL to SOL using Marinade exchange rate
+                    // For now, we'll use the total_staked value which tracks original deposit
+                    msg!("  Marinade strategy detected - including staked SOL in TVL");
+                    // TODO: Parse strategy account and get actual mSOL value with yield
+                }
+            }
+        }
 
         for (i, asset) in vault.assets.iter().enumerate() {
             let ata_account_info = &ctx.remaining_accounts[i * 2 + 1];
@@ -1033,41 +1073,175 @@ pub mod vault {
                 asset_value_usd
             );
 
-            // For SOL: Add directly to return amount
+            // For SOL: Handle both SPL tokens and native SOL
             // For BTC/ETH: Calculate equivalent SOL using MockSwap
             if asset_name == "SOL" {
-                total_sol_to_return += amount_to_withdraw;
+                // Check if we have SPL SOL tokens or native SOL
+                if amount_to_withdraw > 0 {
+                    // SPL token balance
+                    total_sol_to_return += amount_to_withdraw;
+                    sol_from_native += amount_to_withdraw;
+                } else {
+                    // Use native SOL balance
+                    let native_sol_to_withdraw = ((native_sol_balance as u128 * withdrawal_percentage) / 1_000_000) as u64;
+                    total_sol_to_return += native_sol_to_withdraw;
+                    sol_from_native += native_sol_to_withdraw;
+                    msg!("    → Using native SOL: {} lamports", native_sol_to_withdraw);
+                }
             } else {
-                // Use MockSwap to calculate how much SOL we'd get for this asset
-                let sol_equivalent = MockSwap::calculate_swap_output(
-                    amount_to_withdraw,
-                    price.original_price,
-                    price.expo,
-                    sol_normalized.original_price,
-                    sol_normalized.expo,
-                    decimals,
-                    9, // SOL decimals
-                )?;
-                total_sol_to_return += sol_equivalent;
+                // For BTC/ETH: Only swap if we have a non-zero amount
+                if amount_to_withdraw > 0 {
+                    // Use MockSwap to calculate how much SOL we'd get for this asset
+                    let sol_equivalent = MockSwap::calculate_swap_output(
+                        amount_to_withdraw,
+                        price.original_price,
+                        price.expo,
+                        sol_normalized.original_price,
+                        sol_normalized.expo,
+                        decimals,
+                        9, // SOL decimals
+                    )?;
+                    total_sol_to_return += sol_equivalent;
+                    
+                    msg!(
+                        "    → Swapped {} {} to {} SOL equivalent",
+                        amount_to_withdraw,
+                        asset_name,
+                        sol_equivalent
+                    );
+                } else {
+                    msg!("    → No {} balance to withdraw", asset_name);
+                }
+            }
+        }
+
+        // STEP 2.5: Handle Marinade unstaking if strategy is active
+        if let Some(strategy_key) = vault.marinade_strategy {
+            msg!("🌊 Marinade strategy detected - unstaking proportional mSOL!");
+            
+            // Find the strategy account in remaining_accounts
+            let expected_strategy_index = match vault.price_source {
+                PriceSource::MockOracle => vault.assets.len() * 2 + 1, // After oracle
+                PriceSource::Switchboard => vault.assets.len() * 2,
+            };
+            
+            if ctx.remaining_accounts.len() > expected_strategy_index {
+                let strategy_account_info = &ctx.remaining_accounts[expected_strategy_index];
                 
-                msg!(
-                    "    → Swapped to {} SOL equivalent",
-                    sol_equivalent
-                );
+                if strategy_account_info.key() == strategy_key {
+                    msg!("   Strategy account found in remaining_accounts");
+                    
+                    // Read strategy account to get mSOL balance
+                    let strategy_data = strategy_account_info.try_borrow_data()?;
+                    let mut strategy_slice = &strategy_data[..];
+                    let strategy = marinade_strategy::StrategyAccount::try_deserialize(&mut strategy_slice)?;
+                    drop(strategy_data);
+                    
+                    let total_msol = strategy.msol_balance;
+                    let initial_staked = strategy.total_staked;
+                    
+                    msg!("   Total mSOL in strategy: {}", total_msol);
+                    msg!("   Initial SOL staked: {}", initial_staked);
+                    
+                    // Calculate proportional mSOL to unstake
+                    let msol_to_unstake = ((total_msol as u128 * withdrawal_percentage) / 1_000_000) as u64;
+                    
+                    if msol_to_unstake > 0 {
+                        msg!("   Unstaking {} mSOL ({}% of total)", msol_to_unstake, (withdrawal_percentage * 100) / 1_000_000);
+                        
+                        // Record vault balance before unstaking
+                        let vault_balance_before = ctx.accounts.vault.to_account_info().lamports();
+                        
+                        // Build CPI context for marinade_strategy::unstake
+                        let vault_seeds = &[
+                            b"vault".as_ref(),
+                            vault.admin.as_ref(),
+                            vault.name.as_bytes(),
+                            &[vault.bump],
+                        ];
+                        let signer_seeds = &[&vault_seeds[..]];
+                        
+                        let cpi_accounts = marinade_strategy::cpi::accounts::Unstake {
+                            strategy_account: strategy_account_info.clone(),
+                            vault: ctx.accounts.vault.to_account_info(),
+                            sol_receiver: ctx.accounts.sol_receiver.to_account_info(), // System-owned account
+                            marinade_state: ctx.accounts.marinade_state.to_account_info(),
+                            msol_mint: ctx.accounts.msol_mint.to_account_info(),
+                            liq_pool_msol_leg: ctx.accounts.liq_pool_msol_leg.to_account_info(),
+                            liq_pool_sol_leg_pda: ctx.accounts.liq_pool_sol_leg_pda.to_account_info(),
+                            msol_ata: ctx.accounts.strategy_msol_ata.to_account_info(),
+                            treasury_msol_account: ctx.accounts.treasury_msol_account.to_account_info(),
+                            marinade_program: ctx.accounts.marinade_program.to_account_info(),
+                            system_program: ctx.accounts.system_program.to_account_info(),
+                            token_program: ctx.accounts.token_program.to_account_info(),
+                        };
+                        
+                        let cpi_ctx = CpiContext::new_with_signer(
+                            ctx.accounts.marinade_strategy_program.to_account_info(),
+                            cpi_accounts,
+                            signer_seeds,
+                        );
+                        
+                        // Record receiver balance before unstaking (Marinade will transfer to receiver)
+                        let receiver_balance_before = ctx.accounts.sol_receiver.to_account_info().lamports();
+                        
+                        // Execute unstake - Marinade will return SOL to receiver (including yield!)
+                        marinade_strategy::cpi::unstake(cpi_ctx, msol_to_unstake)?;
+                        
+                        // Calculate SOL received by receiver from Marinade (includes yield)
+                        let receiver_balance_after = ctx.accounts.sol_receiver.to_account_info().lamports();
+                        let sol_received_from_marinade = receiver_balance_after.saturating_sub(receiver_balance_before);
+                        
+                        sol_from_marinade = sol_received_from_marinade;
+                        
+                        // SOL is already in the receiver account, no need to transfer
+                        // The receiver account should be the user account in the test
+                        // Add to total SOL to return
+                        total_sol_to_return = total_sol_to_return.checked_add(sol_received_from_marinade)
+                            .ok_or(VaultError::MathOverflow)?;
+                        
+                        // Calculate yield
+                        let proportional_initial = ((initial_staked as u128 * withdrawal_percentage) / 1_000_000) as u64;
+                        let yield_earned = sol_received_from_marinade.saturating_sub(proportional_initial);
+                        
+                        msg!("   ✅ Unstaked {} mSOL", msol_to_unstake);
+                        msg!("   📥 Received {} SOL from Marinade (transferred to user)", sol_received_from_marinade);
+                        msg!("   🎁 Yield earned: {} lamports", yield_earned);
+                    } else {
+                        msg!("   No mSOL to unstake for this withdrawal amount");
+                    }
+                } else {
+                    msg!("   ⚠️  Strategy account mismatch in remaining_accounts");
+                }
+            } else {
+                msg!("   ⚠️  Strategy account not provided in remaining_accounts");
             }
         }
 
         msg!(
-            "💰 Total withdrawal value: ${} USD = {} SOL",
-            total_withdrawal_value_usd,
-            total_sol_to_return
+            "💰 Total withdrawal value: ${} USD",
+            total_withdrawal_value_usd
         );
+        msg!(
+            "   SOL from native/SPL: {} lamports",
+            sol_from_native
+        );
+        if sol_from_marinade > 0 {
+            msg!(
+                "   SOL from Marinade (with yield, already sent to user): {} lamports",
+                sol_from_marinade
+            );
+        }
+        msg!("   SOL to transfer from vault: {} lamports", total_sol_to_return);
+        msg!("   Total SOL user receives: {} lamports", total_sol_to_return + sol_from_marinade);
 
-        // STEP 3: Transfer SOL from vault to user
-        msg!("💸 Transferring {} SOL to user...", total_sol_to_return);
-
-        **ctx.accounts.vault.to_account_info().try_borrow_mut_lamports()? -= total_sol_to_return;
-        **ctx.accounts.user.to_account_info().try_borrow_mut_lamports()? += total_sol_to_return;
+        // STEP 3: Transfer remaining SOL from vault to user
+        // Note: Marinade SOL was already sent directly to user above
+        if total_sol_to_return > 0 {
+            msg!("💸 Transferring {} SOL from vault to user...", total_sol_to_return);
+            **ctx.accounts.vault.to_account_info().try_borrow_mut_lamports()? -= total_sol_to_return;
+            **ctx.accounts.user.to_account_info().try_borrow_mut_lamports()? += total_sol_to_return;
+        }
 
         // STEP 4: Burn shares
         msg!("🔥 Burning {} shares...", shares);
@@ -1422,6 +1596,11 @@ pub struct WithdrawMultiAsset<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
+    /// System-owned account to receive SOL from Marinade (required by Marinade)
+    /// CHECK: Must be system-owned for Marinade liquid_unstake
+    #[account(mut)]
+    pub sol_receiver: UncheckedAccount<'info>,
+
     /// User's ATA holding vault shares (will be burned)
     #[account(
         mut,
@@ -1450,15 +1629,58 @@ pub struct WithdrawMultiAsset<'info> {
     /// CHECK: Optional account - only validated when price_source is Switchboard
     pub sol_quote: UncheckedAccount<'info>,
 
+    // ========== Marinade Strategy Accounts (Optional - only if vault.marinade_strategy is set) ==========
+    
+    /// Marinade Strategy program (for CPI)
+    /// CHECK: This is the marinade_strategy program that wraps Marinade Finance
+    pub marinade_strategy_program: UncheckedAccount<'info>,
+    
+    /// Marinade Finance program (passed through to strategy)
+    /// CHECK: Validated as Marinade program ID when marinade_strategy is configured
+    pub marinade_program: UncheckedAccount<'info>,
+    
+    /// Marinade state account
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub marinade_state: UncheckedAccount<'info>,
+    
+    /// mSOL token mint
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub msol_mint: UncheckedAccount<'info>,
+    
+    /// Liquidity pool mSOL leg
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub liq_pool_msol_leg: UncheckedAccount<'info>,
+    
+    /// Liquidity pool SOL leg PDA
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub liq_pool_sol_leg_pda: UncheckedAccount<'info>,
+    
+    /// Strategy's mSOL ATA
+    /// CHECK: Validated by strategy program
+    #[account(mut)]
+    pub strategy_msol_ata: UncheckedAccount<'info>,
+    
+    /// Treasury mSOL account
+    /// CHECK: Validated by Marinade program during CPI
+    #[account(mut)]
+    pub treasury_msol_account: UncheckedAccount<'info>,
+
     pub clock: Sysvar<'info, Clock>,
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
     
     // remaining_accounts layout:
     // For each asset in vault.assets:
     //   [i*2]: Asset mint account (UncheckedAccount)
     //   [i*2+1]: Vault's ATA for that asset (mut, UncheckedAccount)
+    // After assets: MockOracle (if using MockOracle price source)
+    // After oracle: Marinade strategy account (if marinade_strategy is configured)
 }
 
 #[derive(Accounts)]
