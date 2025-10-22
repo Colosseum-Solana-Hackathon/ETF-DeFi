@@ -1074,13 +1074,13 @@ pub mod vault {
             );
 
             // For SOL: We use native SOL from the vault PDA (not SPL tokens)
+            // The actual SOL withdrawal will be calculated after checking Marinade
             // Note: During deposits, SOL goes as native lamports, not SPL tokens
             // For BTC/ETH: Calculate equivalent SOL using MockSwap
             if asset_name == "SOL" {
-                // SOL is stored as native lamports in the vault PDA
-                // We'll handle native SOL withdrawal after Marinade unstaking
-                // because we need to know how much is in Marinade vs vault
-                msg!("    → SOL will be withdrawn from vault native balance + Marinade");
+                // SOL withdrawal will be calculated after Marinade unstaking
+                // We need to know: vault native balance + Marinade holdings
+                msg!("    → SOL withdrawal will be calculated from native balance + Marinade");
             } else {
                 // For BTC/ETH: Only swap if we have a non-zero amount
                 if amount_to_withdraw > 0 {
@@ -1208,14 +1208,38 @@ pub mod vault {
             }
         }
 
-        // STEP 2.6: Calculate native SOL to withdraw from vault
-        // After Marinade unstaking, calculate how much SOL remains in the vault to withdraw
-        // The vault's native SOL = total deposited - amount staked in Marinade
-        let vault_native_sol_to_withdraw = ((native_sol_balance as u128 * withdrawal_percentage) / 1_000_000) as u64;
-        total_sol_to_return += vault_native_sol_to_withdraw;
+        // STEP 2.6: Calculate total SOL value to withdraw based on withdrawal USD value
+        // We need to convert the total_withdrawal_value_usd to SOL
+        // sol_normalized.price_usd is in micro-dollars (6 decimals)
+        // SOL has 9 decimals (lamports)
+        // Formula: sol_lamports = (withdrawal_value_micro_usd * 10^9) / (sol_price_micro_usd)
+        
+        let withdrawal_sol_raw = (total_withdrawal_value_usd as u128 * 1_000_000_000u128) 
+            / sol_normalized.price_usd as u128;
+        let total_sol_to_withdraw = withdrawal_sol_raw as u64;
+        
+        msg!("   Total withdrawal value: ${} USD (micro)", total_withdrawal_value_usd);
+        msg!("   SOL price: ${} USD (micro)", sol_normalized.price_usd);
+        msg!("   Total SOL to withdraw: {} lamports", total_sol_to_withdraw);
+        msg!("   SOL already unstaked from Marinade: {} lamports", sol_from_marinade);
+        
+        // Calculate remaining SOL to withdraw from vault's native balance
+        // Marinade already sent SOL directly to user, so we only need: total - marinade_amount
+        let vault_native_sol_to_withdraw = total_sol_to_withdraw.saturating_sub(sol_from_marinade);
+        total_sol_to_return = vault_native_sol_to_withdraw;
         sol_from_native = vault_native_sol_to_withdraw;
         
-        msg!("   Vault native SOL withdrawal: {} lamports", vault_native_sol_to_withdraw);
+        msg!("   Vault native SOL to withdraw: {} lamports", vault_native_sol_to_withdraw);
+        
+        // Verify vault has enough SOL
+        let current_vault_lamports = ctx.accounts.vault.to_account_info().lamports();
+        let available_sol = current_vault_lamports.saturating_sub(rent_exempt_minimum);
+        msg!("   Available SOL in vault: {} lamports", available_sol);
+        
+        require!(
+            available_sol >= vault_native_sol_to_withdraw,
+            VaultError::InsufficientBalance
+        );
 
         msg!(
             "💰 Total withdrawal value: ${} USD",
