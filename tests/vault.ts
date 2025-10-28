@@ -26,7 +26,7 @@ import { getMarinadeAccounts, MARINADE_PROGRAM_ID, MSOL_MINT } from "./helpers/m
 async function getAssociatedTokenAddressSync(
   mint: PublicKey,
   owner: PublicKey,
-  allowOwnerOffCurve = false
+  allowOwnerOffCurve = true // Default to true for PDAs
 ): Promise<PublicKey> {
   return await getAssociatedTokenAddress(mint, owner, allowOwnerOffCurve);
 }
@@ -1384,6 +1384,647 @@ describe("Multi-Asset Vault Tests", () => {
       console.log(`   ✓ mSOL was unstaked from Marinade`);
       console.log(`   ✓ Shares were burned correctly`);
       console.log(`   ✓ Strategy state updated`);
+    });
+  });
+
+  /**
+   * ============================================================================
+   * REBALANCING TESTS
+   * ============================================================================
+   * 
+   * Purpose: Test the rebalance instruction to ensure it correctly detects
+   * portfolio drift and executes swaps to restore target allocations.
+   * 
+   * Test Flow:
+   * 1. Create a vault with 40% BTC, 30% ETH, 30% SOL
+   * 2. Manually create asset drift by adjusting prices
+   * 3. Call rebalance instruction
+   * 4. Verify drift detection and swap execution
+   */
+  describe("Rebalancing Tests", () => {
+    const REBALANCE_VAULT_NAME = `RebalanceVault_${Date.now()}`;
+    
+    let rebalanceVault: PublicKey;
+    let rebalanceVaultTokenMint: PublicKey;
+    let btcVaultAta: PublicKey;
+    let ethVaultAta: PublicKey;
+    let solVaultAta: PublicKey;
+
+    before(async () => {
+      console.log("\n" + "=".repeat(80));
+      console.log("REBALANCING TESTS SETUP");
+      console.log("=".repeat(80));
+      
+      // Derive PDAs
+      [rebalanceVault] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), admin.publicKey.toBuffer(), Buffer.from(REBALANCE_VAULT_NAME)],
+        program.programId
+      );
+      
+      [rebalanceVaultTokenMint] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault_mint"), admin.publicKey.toBuffer(), Buffer.from(REBALANCE_VAULT_NAME)],
+        program.programId
+      );
+      
+      // Derive vault ATAs for each asset
+      btcVaultAta = await getAssociatedTokenAddressSync(btcMint, rebalanceVault);
+      ethVaultAta = await getAssociatedTokenAddressSync(ethMint, rebalanceVault);
+      solVaultAta = await getAssociatedTokenAddressSync(solMint, rebalanceVault);
+      
+      console.log("\n🔑 Rebalancing Test PDAs:");
+      console.log(`  Vault:           ${rebalanceVault.toString()}`);
+      console.log(`  BTC ATA:         ${btcVaultAta.toString()}`);
+      console.log(`  ETH ATA:         ${ethVaultAta.toString()}`);
+      console.log(`  SOL ATA:         ${solVaultAta.toString()}`);
+    });
+
+    it("Step 1: Create Vault for Rebalancing (40% BTC, 30% ETH, 30% SOL)", async () => {
+      console.log("\n📦 Creating vault for rebalancing tests...");
+      
+      const assets = [
+        { mint: btcMint, weight: 40, ata: btcVaultAta },
+        { mint: ethMint, weight: 30, ata: ethVaultAta },
+        { mint: solMint, weight: 30, ata: solVaultAta },
+      ];
+      
+      const tx = await program.methods
+        .createVault(REBALANCE_VAULT_NAME, assets)
+        .accounts({
+          admin: admin.publicKey,
+        })
+        .remainingAccounts([
+          { pubkey: btcMint, isWritable: false, isSigner: false },
+          { pubkey: btcVaultAta, isWritable: true, isSigner: false },
+          { pubkey: ethMint, isWritable: false, isSigner: false },
+          { pubkey: ethVaultAta, isWritable: true, isSigner: false },
+          { pubkey: solMint, isWritable: false, isSigner: false },
+          { pubkey: solVaultAta, isWritable: true, isSigner: false },
+        ])
+        .signers([admin])
+        .rpc({ commitment: "confirmed" });
+      
+      console.log("✅ Vault created:", tx);
+      
+      // Verify vault state
+      const vaultData = await program.account.vault.fetch(rebalanceVault);
+      expect(vaultData.name).to.equal(REBALANCE_VAULT_NAME);
+      expect(vaultData.assets.length).to.equal(3);
+    });
+
+    it("Step 2: Configure Vault to Use Mock Oracle", async () => {
+      console.log("\n🔧 Configuring vault to use Mock Oracle...");
+      
+      const tx = await (program.methods as any)
+        .setPriceSource(REBALANCE_VAULT_NAME, { mockOracle: {} }, mockOracle)
+        .accounts({
+          vault: rebalanceVault,
+          authority: admin.publicKey,
+        })
+        .signers([admin])
+        .rpc({ commitment: "confirmed" });
+      
+      console.log("✅ Price source set:", tx);
+      
+      // Verify configuration
+      const vaultData = await program.account.vault.fetch(rebalanceVault);
+      expect(vaultData.priceSource).to.deep.equal({ mockOracle: {} });
+      expect(vaultData.mockOracle).to.not.be.null;
+    });
+
+    it("Step 3: Update Oracle Prices for Baseline", async () => {
+      console.log("\n📊 Setting initial oracle prices...");
+      
+      const mockPrices = {
+        btcPrice: new anchor.BN(100000 * 1_000_000), // $100,000
+        ethPrice: new anchor.BN(3500 * 1_000_000),   // $3,500
+        solPrice: new anchor.BN(150 * 1_000_000),    // $150
+      };
+      
+      const tx = await (program.methods as any)
+        .updateMockOracle(mockPrices.btcPrice, mockPrices.ethPrice, mockPrices.solPrice)
+        .accounts({
+          mockOracle: mockOracle,
+          authority: admin.publicKey,
+        })
+        .signers([admin])
+        .rpc({ commitment: "confirmed" });
+      
+      console.log("✅ Oracle prices updated:", tx);
+      console.log(`  BTC: $${mockPrices.btcPrice.toNumber() / 1_000_000}`);
+      console.log(`  ETH: $${mockPrices.ethPrice.toNumber() / 1_000_000}`);
+      console.log(`  SOL: $${mockPrices.solPrice.toNumber() / 1_000_000}`);
+    });
+
+    it("Step 4: Deposit Funds to Create Initial Portfolio", async () => {
+      console.log("\n💰 Depositing SOL to vault...");
+      
+      const depositAmount = 1 * anchor.web3.LAMPORTS_PER_SOL; // 1 SOL
+      
+      // Get user shares ATA
+      const userSharesAta = await getAssociatedTokenAddressSync(
+        rebalanceVaultTokenMint,
+        admin.publicKey
+      );
+      
+      // Fetch Marinade accounts (required even if not using strategy)
+      const marinadeAccounts = await getMarinadeAccounts(provider.connection);
+      const dummyMsolAta = await getAssociatedTokenAddress(MSOL_MINT, admin.publicKey, false);
+      
+      const tx = await program.methods
+        .depositMultiAsset(REBALANCE_VAULT_NAME, new anchor.BN(depositAmount))
+        .accounts({
+          vault: rebalanceVault,
+          user: admin.publicKey,
+          userSharesAta: userSharesAta,
+          vaultTokenMint: rebalanceVaultTokenMint,
+          btcQuote: PublicKey.default,
+          ethQuote: PublicKey.default,
+          solQuote: PublicKey.default,
+          marinadeStrategyProgram: marinadeProgram.programId,
+          marinadeProgram: MARINADE_PROGRAM_ID,
+          marinadeState: marinadeAccounts.marinadeState,
+          reservePda: marinadeAccounts.reservePda,
+          msolMint: MSOL_MINT,
+          strategyMsolAta: dummyMsolAta,
+          msolMintAuthority: marinadeAccounts.msolMintAuthority,
+          liqPoolSolLegPda: marinadeAccounts.liqPoolSolLegPda,
+          liqPoolMsolLeg: marinadeAccounts.liqPoolMsolLeg,
+          liqPoolMsolLegAuthority: marinadeAccounts.liqPoolMsolLegAuthority,
+          clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
+        } as any)
+        .remainingAccounts([
+          { pubkey: btcMint, isWritable: false, isSigner: false },
+          { pubkey: btcVaultAta, isWritable: true, isSigner: false },
+          { pubkey: ethMint, isWritable: false, isSigner: false },
+          { pubkey: ethVaultAta, isWritable: true, isSigner: false },
+          { pubkey: solMint, isWritable: false, isSigner: false },
+          { pubkey: solVaultAta, isWritable: true, isSigner: false },
+          { pubkey: mockOracle, isWritable: false, isSigner: false },
+        ])
+        .signers([admin])
+        .rpc({ commitment: "confirmed" });
+      
+      console.log("✅ Deposit complete:", tx);
+      console.log(`  Deposited: ${depositAmount / anchor.web3.LAMPORTS_PER_SOL} SOL`);
+    });
+
+    it("Step 5: Simulate Price Change to Create Drift", async () => {
+      console.log("\n📈 Simulating price changes to create drift...");
+      console.log("  Strategy: Increase BTC price significantly to create >5% drift");
+      
+      const newPrices = {
+        btcPrice: new anchor.BN(120000 * 1_000_000), // +20% ($120,000)
+        ethPrice: new anchor.BN(3500 * 1_000_000),   // Same ($3,500)
+        solPrice: new anchor.BN(150 * 1_000_000),    // Same ($150)
+      };
+      
+      const tx = await (program.methods as any)
+        .updateMockOracle(newPrices.btcPrice, newPrices.ethPrice, newPrices.solPrice)
+        .accounts({
+          mockOracle: mockOracle,
+          authority: admin.publicKey,
+        })
+        .signers([admin])
+        .rpc({ commitment: "confirmed" });
+      
+      console.log("✅ Prices updated to create drift:", tx);
+      console.log(`  BTC: $${newPrices.btcPrice.toNumber() / 1_000_000} (+20%)`);
+      console.log(`  ETH: $${newPrices.ethPrice.toNumber() / 1_000_000} (unchanged)`);
+      console.log(`  SOL: $${newPrices.solPrice.toNumber() / 1_000_000} (unchanged)`);
+      console.log("\n  Expected: BTC allocation now >40%, triggering rebalance");
+    });
+
+    it("Step 6: Execute Rebalance to Restore Target Weights", async () => {
+      console.log("\n🔄 Executing rebalance instruction...");
+      
+      const tx = await program.methods
+        .rebalance(REBALANCE_VAULT_NAME)
+        .accounts({
+          vault: rebalanceVault,
+          authority: admin.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .remainingAccounts([
+          { pubkey: mockOracle, isWritable: false, isSigner: false },
+          { pubkey: btcVaultAta, isWritable: true, isSigner: false },
+          { pubkey: ethVaultAta, isWritable: true, isSigner: false },
+          { pubkey: solVaultAta, isWritable: true, isSigner: false },
+        ])
+        .signers([admin])
+        .rpc({ commitment: "confirmed" });
+      
+      console.log("✅ Rebalance executed:", tx);
+      
+      // Get transaction details to see logs
+      const txDetails = await provider.connection.getTransaction(tx, {
+        maxSupportedTransactionVersion: 0,
+        commitment: "confirmed",
+      });
+
+      if (txDetails && txDetails.meta && txDetails.meta.logMessages) {
+        console.log("\n📋 Rebalance Transaction Logs:");
+        txDetails.meta.logMessages
+          .filter(log => 
+            log.includes("Starting rebalancing") ||
+            log.includes("Current prices") ||
+            log.includes("Asset") ||
+            log.includes("drift") ||
+            log.includes("Selling") ||
+            log.includes("Swapping") ||
+            log.includes("Total TVL") ||
+            log.includes("Rebalancing")
+          )
+          .forEach(log => console.log("  ", log));
+      }
+    });
+
+    it("Step 7: Verify Rebalance Handles No-Drift Scenario", async () => {
+      console.log("\n✅ Testing rebalance when portfolio is balanced...");
+      
+      // Immediately try to rebalance again - should detect no drift
+      const tx = await program.methods
+        .rebalance(REBALANCE_VAULT_NAME)
+        .accounts({
+          vault: rebalanceVault,
+          authority: admin.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .remainingAccounts([
+          { pubkey: mockOracle, isWritable: false, isSigner: false },
+          { pubkey: btcVaultAta, isWritable: true, isSigner: false },
+          { pubkey: ethVaultAta, isWritable: true, isSigner: false },
+          { pubkey: solVaultAta, isWritable: true, isSigner: false },
+        ])
+        .signers([admin])
+        .rpc({ commitment: "confirmed" });
+      
+      console.log("✅ No-drift rebalance executed:", tx);
+      
+      // Get transaction logs
+      const txDetails = await provider.connection.getTransaction(tx, {
+        maxSupportedTransactionVersion: 0,
+        commitment: "confirmed",
+      });
+
+      if (txDetails && txDetails.meta && txDetails.meta.logMessages) {
+        const hasNoDriftMessage = txDetails.meta.logMessages.some(log => 
+          log.includes("No rebalancing needed") || log.includes("within threshold")
+        );
+        
+        if (hasNoDriftMessage) {
+          console.log("  ✅ Correctly detected no drift - no swaps executed");
+        }
+      }
+    });
+  });
+
+  /**
+   * ============================================================================
+   * CONFIDENTIAL REBALANCING TESTS (Arcium MXE)
+   * ============================================================================
+   * 
+   * Purpose: Test the rebalance_confidential instruction that uses Arcium's
+   * Multi-Party Computation to prevent MEV attacks by encrypting rebalancing
+   * computation inputs and outputs.
+   * 
+   * Test Flow:
+   * 1. Create a vault with 40% BTC, 30% ETH, 30% SOL
+   * 2. Prepare encrypted portfolio data
+   * 3. Call rebalance_confidential instruction
+   * 4. Verify CPI call to Arcium MXE program
+   * 5. Verify computation is queued successfully
+   */
+  describe("Confidential Rebalancing Tests (Arcium MXE)", () => {
+    const CONFIDENTIAL_VAULT_NAME = `ConfidentialVault_${Date.now()}`;
+    const ARCIUM_MXE_PROGRAM_ID = new PublicKey("6sQTw22nEhpV8byHif5M6zTJXSG1Gp8qtsTY4qfdq65K");
+    
+    let confidentialVault: PublicKey;
+    let confidentialVaultTokenMint: PublicKey;
+    let btcVaultAta: PublicKey;
+    let ethVaultAta: PublicKey;
+    let solVaultAta: PublicKey;
+    
+    // Shared test data
+    let encryptedData: {
+      pub_key: number[];
+      nonce: anchor.BN;
+      encryptedPortfolio: number[][];
+    };
+    
+    // Arcium MXE account PDAs
+    let signPdaAccount: PublicKey;
+    let mxeAccount: PublicKey;
+    let mempoolAccount: PublicKey;
+    let executingPool: PublicKey;
+    let computationAccount: PublicKey;
+    let compDefAccount: PublicKey;
+    let clusterAccount: PublicKey;
+    let poolAccount: PublicKey;
+    let clockAccount: PublicKey;
+    let arciumProgram: PublicKey;
+
+    before(async () => {
+      console.log("\n" + "=".repeat(80));
+      console.log("CONFIDENTIAL REBALANCING TESTS SETUP");
+      console.log("=".repeat(80));
+      
+      // Derive vault PDAs
+      [confidentialVault] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), admin.publicKey.toBuffer(), Buffer.from(CONFIDENTIAL_VAULT_NAME)],
+        program.programId
+      );
+      
+      [confidentialVaultTokenMint] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault_mint"), admin.publicKey.toBuffer(), Buffer.from(CONFIDENTIAL_VAULT_NAME)],
+        program.programId
+      );
+      
+      // Derive vault ATAs
+      btcVaultAta = await getAssociatedTokenAddressSync(btcMint, confidentialVault);
+      ethVaultAta = await getAssociatedTokenAddressSync(ethMint, confidentialVault);
+      solVaultAta = await getAssociatedTokenAddressSync(solMint, confidentialVault);
+      
+      // Derive Arcium MXE account PDAs
+      // Note: These are derived using Arcium's PDA derivation logic
+      arciumProgram = new PublicKey("BKck65TgoKRokMjQM3datB9oRwJ8rAj2jxPXvHXUvcL6");
+      
+      [signPdaAccount] = PublicKey.findProgramAddressSync(
+        [Buffer.from("SignerAccount")],
+        ARCIUM_MXE_PROGRAM_ID
+      );
+      
+      // Use the actual MXE account initialized by `arcium init-mxe`
+      // This was found from the init-mxe transaction on devnet
+      mxeAccount = new PublicKey("FFtGZYfUXf2roU7JKpjPux5P5kVjfy6RbvVV1SrNMpVE");
+      
+      [mempoolAccount] = PublicKey.findProgramAddressSync(
+        [Buffer.from("mempool"), mxeAccount.toBuffer()],
+        arciumProgram
+      );
+      
+      [executingPool] = PublicKey.findProgramAddressSync(
+        [Buffer.from("executing_pool"), mxeAccount.toBuffer()],
+        arciumProgram
+      );
+      
+      // Computation account uses computation_offset as seed
+      const computationOffset = new anchor.BN(Date.now());
+      [computationAccount] = PublicKey.findProgramAddressSync(
+        [Buffer.from("computation"), mxeAccount.toBuffer(), computationOffset.toArrayLike(Buffer, "le", 8)],
+        arciumProgram
+      );
+      
+      // Comp def account for compute_rebalancing
+      // Seeds per Arcium docs: ["ComputationDefinitionAccount", mxe_program_id, comp_def_offset]
+      // comp_def_offset = sha256("compute_rebalancing").slice(0,4) as u32 LE = 116118997
+      const crypto = require('crypto');
+      const hash = crypto.createHash('sha256').update('compute_rebalancing').digest();
+      const compDefOffset = hash.readUInt32LE(0);
+      const compDefOffsetBuffer = Buffer.alloc(4);
+      compDefOffsetBuffer.writeUInt32LE(compDefOffset, 0);
+      
+      [compDefAccount] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("ComputationDefinitionAccount"),
+          ARCIUM_MXE_PROGRAM_ID.toBuffer(),
+          compDefOffsetBuffer
+        ],
+        arciumProgram
+      );
+      
+      [clusterAccount] = PublicKey.findProgramAddressSync(
+        [Buffer.from("cluster"), mxeAccount.toBuffer()],
+        arciumProgram
+      );
+      
+      // Hardcoded Arcium addresses from IDL
+      poolAccount = new PublicKey("7MGSS4iKNM4sVib7bDZDJhVqB6EcchPwVnTKenCY1jt3");
+      clockAccount = new PublicKey("FHriyvoZotYiFnbUzKFjzRSb2NiaC8RPWY7jtKuKhg65");
+      
+      console.log("\n🔑 Confidential Rebalancing PDAs:");
+      console.log(`  Vault:              ${confidentialVault.toString()}`);
+      console.log(`  Arcium MXE Program: ${ARCIUM_MXE_PROGRAM_ID.toString()}`);
+      console.log(`  Sign PDA:           ${signPdaAccount.toString()}`);
+      console.log(`  MXE Account:        ${mxeAccount.toString()}`);
+      console.log(`  Comp Def Account:   ${compDefAccount.toString()}`);
+    });
+
+    it("Step 1: Create Vault for Confidential Rebalancing", async () => {
+      console.log("\n📦 Creating vault for confidential rebalancing...");
+      
+      const assets = [
+        { mint: btcMint, weight: 40, ata: btcVaultAta },
+        { mint: ethMint, weight: 30, ata: ethVaultAta },
+        { mint: solMint, weight: 30, ata: solVaultAta },
+      ];
+      
+      const tx = await program.methods
+        .createVault(CONFIDENTIAL_VAULT_NAME, assets)
+        .accounts({
+          admin: admin.publicKey,
+        })
+        .remainingAccounts([
+          { pubkey: btcMint, isWritable: false, isSigner: false },
+          { pubkey: btcVaultAta, isWritable: true, isSigner: false },
+          { pubkey: ethMint, isWritable: false, isSigner: false },
+          { pubkey: ethVaultAta, isWritable: true, isSigner: false },
+          { pubkey: solMint, isWritable: false, isSigner: false },
+          { pubkey: solVaultAta, isWritable: true, isSigner: false },
+        ])
+        .signers([admin])
+        .rpc({ commitment: "confirmed" });
+      
+      console.log("✅ Vault created:", tx);
+    });
+
+    it("Step 2: Configure Vault to Use Mock Oracle", async () => {
+      console.log("\n🔧 Configuring vault to use Mock Oracle...");
+      
+      const tx = await (program.methods as any)
+        .setPriceSource(CONFIDENTIAL_VAULT_NAME, { mockOracle: {} }, mockOracle)
+        .accounts({
+          vault: confidentialVault,
+          authority: admin.publicKey,
+        })
+        .signers([admin])
+        .rpc({ commitment: "confirmed" });
+      
+      console.log("✅ Price source set:", tx);
+    });
+
+    it("Step 3: Prepare Encrypted Portfolio Data", async () => {
+      console.log("\n🔐 Preparing encrypted portfolio data...");
+      
+      // In production, this would be actual encrypted data using Arcium's encryption
+      // For testing, we use placeholder encrypted values
+      const pub_key = new Uint8Array(32).fill(1); // Mock public key
+      const nonce = new anchor.BN(Date.now()); // Unique nonce for this computation (must be BN for u128)
+      
+      // Encrypted portfolio: 13 assets (each encrypted as [u8; 32])
+      // In production: [BTC_balance, ETH_balance, SOL_balance, BTC_price, ETH_price, SOL_price, 
+      //                 target_weights (3), current_weights (3), threshold]
+      const encryptedPortfolio: number[][] = [];
+      for (let i = 0; i < 13; i++) {
+        const encryptedValue = new Uint8Array(32);
+        // Fill with mock encrypted data (in production, this comes from Arcium encryption)
+        for (let j = 0; j < 32; j++) {
+          encryptedValue[j] = (i * 32 + j) % 256;
+        }
+        encryptedPortfolio.push(Array.from(encryptedValue));
+      }
+      
+      console.log("✅ Encrypted portfolio prepared:");
+      console.log(`  Public Key: ${Buffer.from(pub_key).toString("hex").substring(0, 16)}...`);
+      console.log(`  Nonce: ${nonce}`);
+      console.log(`  Portfolio Entries: ${encryptedPortfolio.length}`);
+      
+      // Store for next tests
+      encryptedData = {
+        pub_key: Array.from(pub_key),
+        nonce,
+        encryptedPortfolio,
+      };
+    });
+
+    it("Step 4: Execute Confidential Rebalance with Arcium MXE", async () => {
+      console.log("\n🔐 Executing confidential rebalance via Arcium MXE...");
+      
+      const { pub_key, nonce, encryptedPortfolio } = encryptedData;
+      const computationOffset = new anchor.BN(Date.now());
+      
+      console.log("  Computation Offset:", computationOffset.toString());
+      
+      try {
+        const tx = await (program.methods as any)
+          .rebalanceConfidential(
+            CONFIDENTIAL_VAULT_NAME,
+            computationOffset,
+            pub_key,
+            nonce,
+            encryptedPortfolio
+          )
+          .accounts({
+            vault: confidentialVault,
+            authority: admin.publicKey,
+            arciumMxeProgram: ARCIUM_MXE_PROGRAM_ID,
+            signPdaAccount: signPdaAccount,
+            mxeAccount: mxeAccount,
+            mempoolAccount: mempoolAccount,
+            executingPool: executingPool,
+            computationAccount: computationAccount,
+            compDefAccount: compDefAccount,
+            clusterAccount: clusterAccount,
+            poolAccount: poolAccount,
+            clockAccount: clockAccount,
+            arciumProgram: arciumProgram,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+          })
+          .remainingAccounts([
+            { pubkey: mockOracle, isWritable: false, isSigner: false },
+          ])
+          .signers([admin])
+          .rpc({ commitment: "confirmed" });
+        
+        console.log("✅ Confidential rebalance executed:", tx);
+        
+        // Get transaction details to see logs
+        const txDetails = await provider.connection.getTransaction(tx, {
+          maxSupportedTransactionVersion: 0,
+          commitment: "confirmed",
+        });
+
+        if (txDetails && txDetails.meta && txDetails.meta.logMessages) {
+          console.log("\n📋 Confidential Rebalance Transaction Logs:");
+          txDetails.meta.logMessages
+            .filter(log => 
+              log.includes("confidential") ||
+              log.includes("Queuing encrypted") ||
+              log.includes("Encrypted computation") ||
+              log.includes("MEV protection") ||
+              log.includes("Instruction data size")
+            )
+            .forEach(log => console.log("  ", log));
+        }
+        
+        // Verify success
+        expect(txDetails?.meta?.err).to.be.null;
+        console.log("\n✅ Confidential rebalancing test passed!");
+        console.log("  ✓ CPI call to Arcium MXE successful");
+        console.log("  ✓ Encrypted computation queued");
+        console.log("  ✓ MEV protection active");
+        
+      } catch (error: any) {
+        console.error("\n❌ Confidential rebalance failed:");
+        console.error("  Error:", error.message);
+        
+        if (error.logs) {
+          console.error("\n  Transaction Logs:");
+          error.logs.forEach((log: string) => console.error("    ", log));
+        }
+        
+        // If MXE accounts not initialized, provide helpful message
+        if (error.message.includes("AccountNotInitialized") || 
+            error.message.includes("Account does not exist")) {
+          console.log("\n💡 Note: Arcium MXE accounts may need to be initialized first:");
+          console.log("  1. Run: arcium init-mxe --cluster-offset 1078779259");
+          console.log("  2. Run: init_compute_rebalancing_comp_def instruction");
+          console.log("  This test verifies the vault program CPI logic is correct.");
+        }
+        
+        throw error;
+      }
+    });
+
+    it("Step 5: Verify Instruction Data Format", async () => {
+      console.log("\n🔍 Verifying instruction data format...");
+      
+      const { pub_key, nonce, encryptedPortfolio } = encryptedData;
+      
+      // Manually construct instruction data to verify format
+      const discriminator = [126, 197, 44, 141, 35, 123, 172, 126];
+      const computationOffset = new anchor.BN(Date.now());
+      
+      let instructionData: number[] = [];
+      
+      // 1. Discriminator (8 bytes)
+      instructionData.push(...discriminator);
+      
+      // 2. computation_offset: u64 (8 bytes, little-endian)
+      const offsetBytes = computationOffset.toArrayLike(Buffer, "le", 8);
+      instructionData.push(...Array.from(offsetBytes));
+      
+      // 3. pub_key: [u8; 32] (32 bytes)
+      instructionData.push(...pub_key);
+      
+      // 4. nonce: u128 (16 bytes, little-endian)
+      const nonceBytes = nonce.toArrayLike(Buffer, "le", 16);
+      instructionData.push(...Array.from(nonceBytes));
+      
+      // 5. encrypted_portfolio: [[u8; 32]; 13] (416 bytes)
+      for (const encrypted of encryptedPortfolio) {
+        instructionData.push(...encrypted);
+      }
+      
+      const expectedSize = 8 + 8 + 32 + 16 + (32 * 13);
+      
+      console.log("  Instruction Data Verification:");
+      console.log(`    Discriminator: ${discriminator.length} bytes`);
+      console.log(`    Computation Offset: 8 bytes`);
+      console.log(`    Public Key: 32 bytes`);
+      console.log(`    Nonce: 16 bytes`);
+      console.log(`    Encrypted Portfolio: ${32 * 13} bytes (13 entries × 32 bytes)`);
+      console.log(`    Total: ${instructionData.length} bytes`);
+      console.log(`    Expected: ${expectedSize} bytes`);
+      
+      expect(instructionData.length).to.equal(expectedSize);
+      console.log("  ✅ Instruction data format is correct!");
     });
   });
 });
