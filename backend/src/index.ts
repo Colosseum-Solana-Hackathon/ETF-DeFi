@@ -11,7 +11,8 @@ app.use(
   cors({
     origin: [
       "http://localhost:3000",     // your Next dev server
-      "https://lyra-fe.vercel.app" // your production frontend
+      "https://lyra-fe.vercel.app", // your Vercel domain
+      "https://lyra.exchange" // your GoDadday domain
     ],
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
