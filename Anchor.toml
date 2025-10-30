@@ -6,8 +6,8 @@ resolution = true
 skip-lint = true
 
 [programs.devnet]
-vault = "4CGJSLVrMmC3rznuUhJzTDtK6NH4sXXzLCun47W6dcSF"
-marinade_strategy = "5QSX9wJvzkDzCT8mGewJGXgtiN7Hq4DqN4VZFhRiWuJh"
+marinade_strategy = "nkezi9u6ZtbhotxSKdv7aZ5PQBJuTcYueE5bUZacD1H"
+vault = "6UWDyeuKMJynAuJ7JxNuXdzqVp1r8beXo1R2GfWYkRdk"
 
 [registry]
 url = "https://api.apr.dev"
@@ -17,23 +17,28 @@ cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 --exclude 'tests/helpers/**' 'tests/**/*.ts'"
 initialize-mock-oracle = "ts-node scripts/initialize-mock-oracle.ts"
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 --exclude 'tests/helpers/**' 'tests/**/*.ts'"
 
 [test]
 startup_wait = 10000
+shutdown_wait = 2000
+upgradeable = false
 
 [test.validator]
+bind_address = "0.0.0.0"
 url = "https://api.devnet.solana.com"
+ledger = ".anchor/test-ledger"
+rpc_port = 8899
 
 [[test.validator.clone]]
-address = "FsJ3A3u2vn5cTVofAjvy6y5kwABJAqYWpe4975bi2epH"  # Pyth Program
+address = "FsJ3A3u2vn5cTVofAjvy6y5kwABJAqYWpe4975bi2epH"
 
 [[test.validator.clone]]
-address = "HovQMDrbAgAYPCmHVSrezcSmkMtXSSUsLDFANExrZh2J"  # BTC/USD Price Feed
+address = "HovQMDrbAgAYPCmHVSrezcSmkMtXSSUsLDFANExrZh2J"
 
 [[test.validator.clone]]
-address = "JBu1AL4obBcCMqKBBxhpWCNUt136ijcuMZLFvTP7iWdB"  # ETH/USD Price Feed
+address = "JBu1AL4obBcCMqKBBxhpWCNUt136ijcuMZLFvTP7iWdB"
 
 [[test.validator.clone]]
-address = "H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG"  # SOL/USD Price Feed
+address = "H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG"

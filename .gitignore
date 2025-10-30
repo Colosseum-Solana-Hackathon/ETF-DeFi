@@ -8,3 +8,5 @@ test-ledger
 .env
 devnet-keypair.json
 admin-keypair.json
+build
+artifacts
