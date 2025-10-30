@@ -1633,7 +1633,7 @@ pub mod vault {
         computation_offset: u64,
         pub_key: [u8; 32],
         nonce: u128,
-        encrypted_portfolio: [[u8; 32]; 13],
+        encrypted_user_funds: [u8; 32],
     ) -> Result<()> {
         let vault = &ctx.accounts.vault;
         
@@ -1660,8 +1660,8 @@ pub mod vault {
         // STEP 2: Build instruction data for compute_rebalancing
         // Instruction discriminator from IDL: [126, 197, 44, 141, 35, 123, 172, 126]
         // This is the first 8 bytes of SHA256("global:compute_rebalancing")
-        // Total size: 8 + 8 + 32 + 16 + 416 = 480 bytes (fixed size)
-        let mut instruction_data = [0u8; 480];
+        // Total size: 8 + 8 + 32 + 16 + 32 = 96 bytes (fixed size)
+        let mut instruction_data = [0u8; 96];
         let mut offset = 0;
         
         // Add discriminator (8 bytes)
@@ -1680,14 +1680,12 @@ pub mod vault {
         instruction_data[offset..offset + 16].copy_from_slice(&nonce.to_le_bytes());
         offset += 16;
         
-        // 4. encrypted_portfolio: [[u8; 32]; 13] (416 bytes)
-        for encrypted_value in encrypted_portfolio.iter() {
-            instruction_data[offset..offset + 32].copy_from_slice(encrypted_value);
-            offset += 32;
-        }
+        // 4. encrypted_user_funds: [u8; 32] (32 bytes) - Just ONE encrypted value
+        instruction_data[offset..offset + 32].copy_from_slice(&encrypted_user_funds);
+        offset += 32;
         
         msg!("   Instruction data size: {} bytes", offset);
-        msg!("   Expected: 8 (discriminator) + 8 (offset) + 32 (pub_key) + 16 (nonce) + 416 (portfolio) = 480 bytes");
+        msg!("   Expected: 8 (discriminator) + 8 (offset) + 32 (pub_key) + 16 (nonce) + 32 (funds) = 96 bytes");
 
         // STEP 3: Build account metas for CPI
         use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};

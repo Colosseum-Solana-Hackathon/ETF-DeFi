@@ -9,6 +9,7 @@
     "init-oracle": "anchor run initialize-mock-oracle",
     "create-etf-basket": "export ANCHOR_PROVIDER_URL=https://api.devnet.solana.com && export ANCHOR_WALLET=~/.config/solana/id.json && npx ts-node scripts/create-etf-vault.ts",
     "update-prices": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana/id.json ts-node scripts/update-prices.ts",
+    "check-oracle": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana/id.json ts-node scripts/check-oracle-freshness.ts",
     "show-yield": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=./admin-keypair.json ts-node scripts/show-marinade-yield.ts"
   },
   "dependencies": {

@@ -1,24 +1,33 @@
 use anchor_lang::prelude::*;
 use arcium_anchor::prelude::*;
+use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
 
+declare_id!("FwbzbjGyBmb5n7VAPfMnYKZthycScuA6ktGE7rtZ2Z9x");
+
+// Use the comp_def_offset macro to generate the correct offset
 const COMP_DEF_OFFSET_COMPUTE_REBALANCING: u32 = comp_def_offset("compute_rebalancing");
-
-declare_id!("6sQTw22nEhpV8byHif5M6zTJXSG1Gp8qtsTY4qfdq65K");
 
 #[arcium_program]
 pub mod rebalancing_mxe {
     use super::*;
 
     pub fn init_compute_rebalancing_comp_def(ctx: Context<InitComputeRebalancingCompDef>) -> Result<()> {
-        // Store circuit ON-CHAIN for hackathon (simple and works)
-        // use_onchain_source = true means circuit data is stored directly on-chain
-        // This costs ~0.15 SOL per circuit but is perfect for demos
+        // OFFCHAIN storage - circuit hosted on Supabase
+        // This allows large circuits (3.5MB+) without hitting Solana memory limits
         init_comp_def(
             ctx.accounts,
-            true,  // use_onchain_source = true (KEY CHANGE)
-            0,     // version
-            None,  // offchain_source (not used)
-            None,  // extra_accounts (not used)
+            false,  // use_onchain_source = false (USE OFFCHAIN!)
+            0,      // version
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: "https://ukoyajhenncivefnmkak.supabase.co/storage/v1/object/public/arcium_circuits/compute_rebalancing_testnet.arcis".to_string(),
+                hash: [
+                    0x45, 0x90, 0x56, 0xc9, 0x35, 0x64, 0x7b, 0x59,
+                    0x5f, 0x75, 0xc1, 0x43, 0xa1, 0xd1, 0xa5, 0x47,
+                    0xbf, 0x68, 0xd6, 0x46, 0xf0, 0xd0, 0xbd, 0xdf,
+                    0x71, 0x21, 0x8f, 0x7f, 0xb6, 0x5d, 0x5d, 0xe9,
+                ], // SHA256 hash of compute_rebalancing_testnet.arcis
+            })),
+            None,   // extra_accounts not used
         )?;
         Ok(())
     }
@@ -28,18 +37,16 @@ pub mod rebalancing_mxe {
         computation_offset: u64,
         pub_key: [u8; 32],
         nonce: u128,
-        encrypted_portfolio: [[u8; 32]; 13],
+        encrypted_user_funds: [u8; 32], 
     ) -> Result<()> {
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
         
-        let mut args = vec![
+        // Only one encrypted argument (the user's funds)
+        let args = vec![
             Argument::ArcisPubkey(pub_key),
             Argument::PlaintextU128(nonce),
+            Argument::EncryptedU8(encrypted_user_funds),
         ];
-        
-        for encrypted_value in encrypted_portfolio.iter() {
-            args.push(Argument::EncryptedU8(*encrypted_value));
-        }
 
         queue_computation(
             ctx.accounts,

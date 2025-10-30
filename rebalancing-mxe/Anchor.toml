@@ -9,7 +9,7 @@ skip-lint = false
 rebalancing_mxe = "4MGjLr7BWCugRw2ExPpRfAptkM9rzNz5tfeuMAvP5XtA"
 
 [programs.devnet]
-rebalancing_mxe = "6sQTw22nEhpV8byHif5M6zTJXSG1Gp8qtsTY4qfdq65K"
+rebalancing_mxe = "FwbzbjGyBmb5n7VAPfMnYKZthycScuA6ktGE7rtZ2Z9x"
 
 [registry]
 url = "https://api.apr.dev"

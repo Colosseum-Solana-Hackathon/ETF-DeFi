@@ -13,13 +13,13 @@ backends = ["Cerberus"]
 # manticore_data_folders = []
 
 [programs.localnet]
-rebalancing_mxe = "6sQTw22nEhpV8byHif5M6zTJXSG1Gp8qtsTY4qfdq65K"
+rebalancing_mxe = "21dz7vGVgPMzUKJGG7pX63ZoFBV9fuLiu1qmJ4bnmCQ4"
 
 [programs.devnet]
-rebalancing_mxe = "6sQTw22nEhpV8byHif5M6zTJXSG1Gp8qtsTY4qfdq65K"
+rebalancing_mxe = "21dz7vGVgPMzUKJGG7pX63ZoFBV9fuLiu1qmJ4bnmCQ4"
 
 [programs.testnet]
-rebalancing_mxe = "6sQTw22nEhpV8byHif5M6zTJXSG1Gp8qtsTY4qfdq65K"
+rebalancing_mxe = "21dz7vGVgPMzUKJGG7pX63ZoFBV9fuLiu1qmJ4bnmCQ4"
 
 [testnet]
 backends = ["Cerberus"]
