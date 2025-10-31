@@ -6,8 +6,8 @@ resolution = true
 skip-lint = true
 
 [programs.devnet]
-marinade_strategy = "nkezi9u6ZtbhotxSKdv7aZ5PQBJuTcYueE5bUZacD1H"
-vault = "6UWDyeuKMJynAuJ7JxNuXdzqVp1r8beXo1R2GfWYkRdk"
+marinade_strategy = "6U2DYMNfoY1G5toBdFgDZGjriWS2i9VZTZcMWE13dBLC"
+vault = "Faiwct1BxfrV1w5xYs8Y55mQ4VJXPGx1qPBZJnw5p7pR"
 
 [registry]
 url = "https://api.apr.dev"

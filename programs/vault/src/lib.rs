@@ -4,6 +4,11 @@ use anchor_lang::system_program::{transfer, Transfer};
 use anchor_spl::associated_token::{spl_associated_token_account, AssociatedToken};
 use anchor_spl::token::{Mint, Token, TokenAccount};
 
+// Ephemeral Rollups SDK imports
+use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
+use ephemeral_rollups_sdk::cpi::DelegateConfig;
+use ephemeral_rollups_sdk::ephem::{commit_accounts, commit_and_undelegate_accounts};
+
 // Mock swap module for devnet testing
 mod swap;
 use swap::MockSwap;
@@ -317,8 +322,9 @@ pub struct WithdrawEvent {
   pub tvl_usd: i64,
 }
 
-declare_id!("6UWDyeuKMJynAuJ7JxNuXdzqVp1r8beXo1R2GfWYkRdk");
+declare_id!("Faiwct1BxfrV1w5xYs8Y55mQ4VJXPGx1qPBZJnw5p7pR");
 
+#[ephemeral]
 #[program(heap = 262144)] // 256KB heap for CPI operations with large instruction data
 pub mod vault {
   use super::*;    /// Create a new multi-asset vault with custom composition
@@ -1375,6 +1381,83 @@ pub mod vault {
         Ok(())
     }
 
+    // ============================================================================
+    // EPHEMERAL ROLLUPS INTEGRATION (TEMPORARILY DISABLED)
+    // ============================================================================
+    // The following instructions are disabled pending ER SDK compatibility fixes
+    // Issue: borsh version mismatch between Anchor 0.31.1 and ephemeral-rollups-sdk 0.2.11
+    // Will be re-enabled once MagicBlock updates SDK for Anchor 0.31+ compatibility
+    
+    
+    /// Delegate mock oracle to Ephemeral Rollup for high-frequency price updates
+    /// This transfers ownership of the oracle PDA to the ER delegation program
+    /// Allows sub-second price updates without L1 transaction fees
+    /// Only callable by oracle authority
+    pub fn delegate_mock_oracle(ctx: Context<DelegateMockOracleCtx>) -> Result<()> {
+        // Delegate the oracle PDA to Ephemeral Rollup
+        // The #[delegate] macro on DelegateMockOracle provides the delegate_pda method
+        ctx.accounts.delegate_pda(
+            &ctx.accounts.payer,
+            &[b"mock_oracle", ctx.accounts.payer.key().as_ref()],
+            DelegateConfig {
+                validator: None, // Will use default ER validator
+                commit_frequency_ms: 30_000, // Commit to L1 every 30 seconds
+            },
+        )?;
+
+        msg!("Mock oracle delegated to Ephemeral Rollup: {}", ctx.accounts.pda.key());
+        msg!("High-frequency price updates now enabled (sub-second latency)");
+
+        Ok(())
+    }    /// Commit mock oracle state to L1 without undelegating
+    /// This creates a checkpoint on L1 while keeping the oracle on ER
+    /// Useful for periodic state synchronization
+    pub fn commit_mock_oracle(ctx: Context<CommitMockOracle>) -> Result<()> {
+        let authority = &ctx.accounts.authority;
+        let mock_oracle = &ctx.accounts.mock_oracle;
+        
+        // Commit the oracle account state to L1
+        commit_accounts(
+            authority,
+            vec![&mock_oracle.to_account_info()],
+            &ctx.accounts.magic_context,
+            &ctx.accounts.magic_program,
+        )?;
+
+        msg!("Mock oracle state committed to L1: {}", mock_oracle.key());
+        msg!("Oracle remains on ER for continued high-frequency updates");
+        
+        Ok(())
+    }
+
+    /// Undelegate mock oracle from Ephemeral Rollup back to L1
+    /// This commits final state and returns ownership to the vault program
+    /// Callable by oracle authority to end ER session
+    pub fn undelegate_mock_oracle(ctx: Context<UndelegateMockOracle>) -> Result<()> {
+        let authority = &ctx.accounts.authority;
+        let mock_oracle = &ctx.accounts.mock_oracle;
+        
+        // Verify authority
+        require!(
+            authority.key() == mock_oracle.authority,
+            VaultError::Unauthorized
+        );
+
+        // Commit and undelegate the oracle back to L1
+        commit_and_undelegate_accounts(
+            authority,
+            vec![&mock_oracle.to_account_info()],
+            &ctx.accounts.magic_context,
+            &ctx.accounts.magic_program,
+        )?;
+
+        msg!("Mock oracle undelegated from Ephemeral Rollup: {}", mock_oracle.key());
+        msg!("Oracle returned to L1, final state committed");
+        
+        Ok(())
+    }
+    
+
     /// Set price source for vault (Switchboard or MockOracle)
     /// Allows switching between real Switchboard feeds and mock oracle
     pub fn set_price_source(
@@ -2208,6 +2291,56 @@ pub struct UpdateMockOracle<'info> {
     pub mock_oracle: Account<'info, MockPriceOracle>,
 
     pub authority: Signer<'info>,
+}
+
+// ============================================================================
+// EPHEMERAL ROLLUPS CONTEXTS (TEMPORARILY DISABLED)
+// ============================================================================
+// Disabled pending ER SDK compatibility with Anchor 0.31.1+
+
+/// Context for delegating mock oracle to Ephemeral Rollup
+/// Uses #[delegate] macro from ephemeral-rollups-sdk
+#[delegate]
+#[derive(Accounts)]
+pub struct DelegateMockOracleCtx<'info> {
+    pub payer: Signer<'info>,
+
+    /// The mock oracle PDA to delegate to ER
+    /// CHECK: The pda to delegate
+    #[account(mut, del)]
+    pub pda: AccountInfo<'info>,
+}/// Context for committing mock oracle state to L1 (without undelegating)
+/// Uses #[commit] macro from ephemeral-rollups-sdk
+#[commit]
+#[derive(Accounts)]
+pub struct CommitMockOracle<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    
+    /// The mock oracle account to commit
+    #[account(
+        mut,
+        seeds = [b"mock_oracle", authority.key().as_ref()],
+        bump = mock_oracle.bump
+    )]
+    pub mock_oracle: Account<'info, MockPriceOracle>,
+}
+
+/// Context for undelegating mock oracle from Ephemeral Rollup back to L1
+/// Uses #[commit] macro to handle commit + undelegate operation
+#[commit]
+#[derive(Accounts)]
+pub struct UndelegateMockOracle<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    
+    /// The mock oracle account to undelegate
+    #[account(
+        mut,
+        seeds = [b"mock_oracle", authority.key().as_ref()],
+        bump = mock_oracle.bump
+    )]
+    pub mock_oracle: Account<'info, MockPriceOracle>,
 }
 
 #[derive(Accounts)]

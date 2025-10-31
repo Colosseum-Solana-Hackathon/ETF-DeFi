@@ -10,7 +10,11 @@
     "create-etf-basket": "export ANCHOR_PROVIDER_URL=https://api.devnet.solana.com && export ANCHOR_WALLET=~/.config/solana/id.json && npx ts-node scripts/create-etf-vault.ts",
     "update-prices": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana/id.json ts-node scripts/update-prices.ts",
     "check-oracle": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana/id.json ts-node scripts/check-oracle-freshness.ts",
-    "show-yield": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=./admin-keypair.json ts-node scripts/show-marinade-yield.ts"
+    "show-yield": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=./admin-keypair.json ts-node scripts/show-marinade-yield.ts",
+    "delegate-oracle": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana/id.json ts-node scripts/delegate-oracle.ts",
+    "undelegate-oracle": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana/id.json ts-node scripts/undelegate-oracle.ts",
+    "update-prices-er": "ts-node scripts/update-prices-er.ts",
+    "check-oracle-status": "ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ts-node scripts/check-oracle-status.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",
