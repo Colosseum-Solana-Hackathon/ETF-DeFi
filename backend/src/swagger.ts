@@ -171,8 +171,132 @@ const swaggerSpec = {
       500: { description: "Internal server error" },
     },
   },
-},
-
+    },
+    "/api/wallet/connect": {
+      post: {
+        summary: "Track wallet connection",
+        description:
+          "Saves wallet connection data to Supabase for analytics and tracking purposes",
+        tags: ["Wallet"],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["walletAddress", "walletProvider", "connectedAt"],
+                properties: {
+                  walletAddress: {
+                    type: "string",
+                    description: "Solana public key (base58 encoded, 32-44 characters)",
+                    example: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+                  },
+                  walletProvider: {
+                    type: "string",
+                    description: "Wallet provider name (e.g., 'Phantom', 'Solflare', 'Backpack')",
+                    example: "Phantom",
+                  },
+                  connectedAt: {
+                    type: "string",
+                    format: "date-time",
+                    description: "ISO 8601 timestamp of when the wallet was connected",
+                    example: "2024-01-15T10:30:00.000Z",
+                  },
+                  network: {
+                    type: "string",
+                    enum: ["devnet", "mainnet-beta"],
+                    description: "Solana network the wallet is connected to",
+                    example: "mainnet-beta",
+                  },
+                  userAgent: {
+                    type: "string",
+                    description: "Browser user agent string",
+                    example: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                  },
+                  sessionId: {
+                    type: "string",
+                    description: "Session identifier for tracking user sessions",
+                    example: "sess_abc123xyz",
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: "Wallet connection tracked successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    success: {
+                      type: "boolean",
+                      example: true,
+                    },
+                    message: {
+                      type: "string",
+                      example: "Wallet connection tracked successfully",
+                    },
+                    walletId: {
+                      type: "string",
+                      format: "uuid",
+                      description: "UUID of the created wallet connection record",
+                      example: "123e4567-e89b-12d3-a456-426614174000",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          400: {
+            description: "Validation error",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    success: {
+                      type: "boolean",
+                      example: false,
+                    },
+                    message: {
+                      type: "string",
+                      example: "Invalid Solana wallet address format. Must be a valid base58-encoded public key (32-44 characters)",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          500: {
+            description: "Internal server error",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    success: {
+                      type: "boolean",
+                      example: false,
+                    },
+                    message: {
+                      type: "string",
+                      example: "Failed to save wallet connection data",
+                    },
+                    error: {
+                      type: "string",
+                      description: "Error details (only in development)",
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
   },
   components: {},
 } as const;
