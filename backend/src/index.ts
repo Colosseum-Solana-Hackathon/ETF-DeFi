@@ -1,10 +1,15 @@
 import express from "express";
 import jupiterRouter from "./routes/jupiterRouter";
+import walletRouter from "./routes/walletRouter";
+import authRouter from "./routes/authRouter";
 import swaggerUi from "swagger-ui-express";
 import swaggerSpec from "./swagger";
 import cors from "cors";
 
 const app = express();
+
+// Middleware
+app.use(express.json());
 
 // allow your frontend origin in dev
 app.use(
@@ -21,6 +26,8 @@ app.use(
 );
 
 app.use("/api/jupiter", jupiterRouter);
+app.use("/api/wallet", walletRouter);
+app.use("/api/auth", authRouter);
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.listen(8000, () => console.log("Server running on port 8000"));
 
