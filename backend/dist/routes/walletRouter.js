@@ -69,31 +69,68 @@ walletRouter.post("/connect", async (req, res) => {
         }
         // Convert ISO string to PostgreSQL TIMESTAMPTZ
         const connectedAtDate = new Date(connectedAt);
-        // Insert into Supabase
-        const { data, error } = await supabase_1.supabase
+        // Check if wallet connection already exists
+        const { data: existingConnection } = await supabase_1.supabase
             .from("wallet_connections")
-            .insert({
-            wallet_address: walletAddress,
-            wallet_provider: walletProvider,
-            connected_at: connectedAtDate.toISOString(),
-            network: network || null,
-            user_agent: userAgent || null,
-            session_id: sessionId || null,
-        })
             .select("id")
+            .eq("wallet_address", walletAddress)
             .single();
-        if (error) {
-            console.error("Supabase insert error:", error);
-            return res.status(500).json({
-                success: false,
-                message: "Failed to save wallet connection data",
-                error: error.message,
-            });
+        let walletId;
+        if (existingConnection) {
+            // Update existing connection
+            const { data, error } = await supabase_1.supabase
+                .from("wallet_connections")
+                .update({
+                wallet_provider: walletProvider,
+                connected_at: connectedAtDate.toISOString(),
+                network: network || null,
+                user_agent: userAgent || null,
+                session_id: sessionId || null,
+                updated_at: new Date().toISOString(),
+            })
+                .eq("wallet_address", walletAddress)
+                .select("id")
+                .single();
+            if (error) {
+                console.error("Supabase update error:", error);
+                return res.status(500).json({
+                    success: false,
+                    message: "Failed to update wallet connection data",
+                    error: error.message,
+                });
+            }
+            walletId = data.id;
+        }
+        else {
+            // Insert new connection
+            const { data, error } = await supabase_1.supabase
+                .from("wallet_connections")
+                .insert({
+                wallet_address: walletAddress,
+                wallet_provider: walletProvider,
+                connected_at: connectedAtDate.toISOString(),
+                network: network || null,
+                user_agent: userAgent || null,
+                session_id: sessionId || null,
+            })
+                .select("id")
+                .single();
+            if (error) {
+                console.error("Supabase insert error:", error);
+                return res.status(500).json({
+                    success: false,
+                    message: "Failed to save wallet connection data",
+                    error: error.message,
+                });
+            }
+            walletId = data.id;
         }
         return res.status(200).json({
             success: true,
-            message: "Wallet connection tracked successfully",
-            walletId: data.id,
+            message: existingConnection
+                ? "Wallet connection updated successfully"
+                : "Wallet connection tracked successfully",
+            walletId: walletId,
         });
     }
     catch (err) {

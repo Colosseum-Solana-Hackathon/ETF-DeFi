@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const jupiterRouter_1 = __importDefault(require("./routes/jupiterRouter"));
 const walletRouter_1 = __importDefault(require("./routes/walletRouter"));
+const authRouter_1 = __importDefault(require("./routes/authRouter"));
 const swagger_ui_express_1 = __importDefault(require("swagger-ui-express"));
 const swagger_1 = __importDefault(require("./swagger"));
 const cors_1 = __importDefault(require("cors"));
@@ -25,5 +26,6 @@ app.use((0, cors_1.default)({
 }));
 app.use("/api/jupiter", jupiterRouter_1.default);
 app.use("/api/wallet", walletRouter_1.default);
+app.use("/api/auth", authRouter_1.default);
 app.use("/api-docs", swagger_ui_express_1.default.serve, swagger_ui_express_1.default.setup(swagger_1.default));
 app.listen(8000, () => console.log("Server running on port 8000"));

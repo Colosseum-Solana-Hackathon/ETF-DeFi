@@ -297,8 +297,108 @@ const swaggerSpec = {
         },
       },
     },
+    "/api/auth/refresh": {
+      post: {
+        summary: "Refresh access token",
+        description: "Exchanges a refresh token for a new access token",
+        tags: ["Authentication"],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["refreshToken"],
+                properties: {
+                  refreshToken: {
+                    type: "string",
+                    description: "Refresh token from initial authentication",
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: "Token refreshed successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    success: { type: "boolean" },
+                    accessToken: { type: "string" },
+                    refreshToken: { type: "string" },
+                    expiresIn: { type: "integer" },
+                    tokenType: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: "Invalid refresh token" },
+        },
+      },
+    },
+    "/api/auth/me": {
+      get: {
+        summary: "Get current user",
+        description: "Returns the authenticated user's information",
+        tags: ["Authentication"],
+        responses: {
+          200: {
+            description: "User information",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    success: { type: "boolean" },
+                    user: { type: "object" },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
+    "/api/auth/logout": {
+      post: {
+        summary: "Logout user",
+        description: "Invalidates the user's refresh token",
+        tags: ["Authentication"],
+        responses: {
+          200: {
+            description: "Logged out successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    success: { type: "boolean" },
+                    message: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: "Unauthorized" },
+        },
+      },
+    },
   },
-  components: {},
+  components: {
+    securitySchemes: {
+      bearerAuth: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "JWT",
+      },
+    },
+  },
 } as const;
 
 export default swaggerSpec;

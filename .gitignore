@@ -10,3 +10,4 @@ devnet-keypair.json
 admin-keypair.json
 build
 artifacts
+backend/migrations
