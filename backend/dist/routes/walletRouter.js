@@ -77,16 +77,14 @@ walletRouter.post("/connect", async (req, res) => {
             .single();
         let walletId;
         if (existingConnection) {
-            // Update existing connection
+            // Update existing connection - only update connected_at, session_id, and updated_at
+            // updated_at is automatically updated by the database trigger
             const { data, error } = await supabase_1.supabase
                 .from("wallet_connections")
                 .update({
-                wallet_provider: walletProvider,
                 connected_at: connectedAtDate.toISOString(),
-                network: network || null,
-                user_agent: userAgent || null,
                 session_id: sessionId || null,
-                updated_at: new Date().toISOString(),
+                // updated_at is automatically handled by the database trigger
             })
                 .eq("wallet_address", walletAddress)
                 .select("id")

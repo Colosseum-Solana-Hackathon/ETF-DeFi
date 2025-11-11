@@ -18,6 +18,9 @@ interface WalletConnectRequest {
  * POST /api/wallet/connect
  * 
  * Saves wallet connection data to Supabase
+ * - If wallet doesn't exist: Creates a new record with all provided data
+ * - If wallet already exists: Updates only connected_at, session_id, and updated_at
+ * - Ensures unique wallets (one record per wallet address)
  * 
  * Request body:
  * {
@@ -32,7 +35,7 @@ interface WalletConnectRequest {
  * Response (200):
  * {
  *   success: true,
- *   message: "Wallet connection tracked successfully",
+ *   message: "Wallet connection tracked successfully" | "Wallet connection updated successfully",
  *   walletId: "uuid"
  * }
  * 
@@ -98,16 +101,14 @@ walletRouter.post("/connect", async (req: Request, res: Response) => {
     let walletId: string;
 
     if (existingConnection) {
-      // Update existing connection
+      // Update existing connection - only update connected_at, session_id, and updated_at
+      // updated_at is automatically updated by the database trigger
       const { data, error } = await supabase
         .from("wallet_connections")
         .update({
-          wallet_provider: walletProvider,
           connected_at: connectedAtDate.toISOString(),
-          network: network || null,
-          user_agent: userAgent || null,
           session_id: sessionId || null,
-          updated_at: new Date().toISOString(),
+          // updated_at is automatically handled by the database trigger
         })
         .eq("wallet_address", walletAddress)
         .select("id")
